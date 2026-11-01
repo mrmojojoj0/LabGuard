@@ -1,0 +1,1047 @@
+LABGUARD TWO-PROJECT TECHNICAL SPECIFICATION Client Agent + Management
+Server Version: 1.0 Scope: Windows laboratory PC management
+(physical/CCTV monitoring excluded)
+
+====================================================================== 1.
+PROJECT OVERVIEW
+======================================================================
+
+LabGuard is a centralized Windows computer-lab management system
+composed of exactly two independently developed Python projects:
+
+1.  labguard-server The central management service and administrator
+    interface. It stores device records, manages rooms and PC layouts,
+    receives telemetry, maintains connection status, distributes
+    authorized jobs, collects results, and provides administrative
+    controls.
+
+2.  labguard-client A Windows endpoint agent installed on every managed
+    laboratory PC. It registers the computer, reports identity and
+    health information, maintains a secure connection to the server,
+    receives authorized jobs, performs approved operations, and reports
+    results.
+
+The system should initially support approximately 50 Windows PCs, while
+being designed so that it can scale to a larger fleet.
+
+The system is for computers that the institution owns or is authorized
+to manage. Monitoring and administrative actions must be disclosed and
+authorized by the institution. Do not implement covert surveillance,
+credential collection, keylogging, stealth, security-control bypass, or
+unauthorized access.
+
+OUT OF SCOPE FOR THIS VERSION - CCTV, camera monitoring, YOLO, and
+physical behaviour monitoring. - Physical access control and attendance
+systems. - Decrypting HTTPS or VPN traffic. - Bypassing UAC, antivirus,
+endpoint security, or Windows protections. - Hidden remote control or
+invisible desktop interaction. - Arbitrary unrestricted command
+execution from the server.
+
+======================================================================
+2. HIGH-LEVEL ARCHITECTURE
+======================================================================
+
+Administrator browser | | HTTPS / WebSocket v LabGuard Server - Admin
+interface - REST API - WebSocket connection manager - Authentication and
+authorization - Device registry - Room and grid manager - Job/command
+queue - Telemetry and inventory storage - Audit log | | Outbound
+authenticated TLS connection from clients v LabGuard Client Agents -
+LAB-PC-01 - LAB-PC-02 - LAB-PC-03 - … - LAB-PC-50
+
+Preferred communication model: - Each client initiates an outbound
+connection to the server. - Do not require inbound connections to client
+PCs for normal operation. - Use HTTPS for API operations and secure
+WebSockets for persistent communication, heartbeat, job delivery, and
+result notifications. - If WebSockets are temporarily unavailable, the
+client reconnects with exponential backoff and jitter. - The client must
+not assume that an open TCP connection alone means the agent is healthy;
+heartbeat and job acknowledgements are also required.
+
+Recommended initial technology: - Python 3.12 or a currently supported
+Python release. - Server: FastAPI, Uvicorn, SQLAlchemy 2, Alembic. -
+Database: PostgreSQL for a multi-PC deployment. - Client: Python,
+psutil, pywin32, Windows APIs, subprocess. - Communication: HTTPS REST +
+WSS. - Data validation: Pydantic. - Logging: Python logging with
+rotating files. - Packaging: PyInstaller or an equivalent Windows
+packaging method. - Testing: pytest. - Admin interface: server-served
+web UI using Jinja2/HTMX or another lightweight frontend. Keep the
+server and client as the two deployable projects. The UI may be part of
+the server project.
+
+Avoid adding Redis, message brokers, Kubernetes, or microservices in the
+first release unless real load testing demonstrates a need.
+
+======================================================================
+3. PROJECT A: LABGUARD-SERVER
+======================================================================
+
+3.1 SERVER RESPONSIBILITIES
+
+The server is the source of truth for: - Registered devices and their
+persistent identities. - MAC addresses and network interfaces reported
+by each device. - Current and historical IP addresses. -
+Administrator-assigned PC names. - Rooms, groups, and grid positions. -
+Agent connection and heartbeat status. - System telemetry and software
+inventory snapshots. - Approved software catalog and deployment jobs. -
+Process-management requests and results. - Network statistics and
+permitted network metadata. - Policies and administrative audit records.
+
+The server must not assume that a device is online merely because its IP
+responds to ping. Agent connectivity and network reachability are
+separate signals.
+
+3.2 SERVER MODULES
+
+A. API AND APPLICATION CORE - FastAPI application entry point. -
+Versioned API routes, e.g. /api/v1/. - Pydantic request and response
+schemas. - Central exception handling. - Request validation and
+consistent error responses. - Health/readiness endpoints. - API
+documentation available only to authorized administrators in production.
+
+B. AUTHENTICATION AND AUTHORIZATION - Administrator login and logout. -
+Secure password hashing using Argon2id or bcrypt. - Role-based access
+control. - Suggested roles: - Super Admin: full configuration and
+account management. - Lab Admin: device, software, and room
+management. - Operator: approved operational actions. - Viewer:
+read-only monitoring and reports. - Session expiry and revocation. -
+Rate limiting for authentication endpoints. - Optional MFA in a later
+release. - Record administrator identity for every privileged action. -
+Never store plaintext passwords or reusable secrets in logs.
+
+C. DEVICE REGISTRY Store and manage: - Internal device UUID. -
+Persistent client identity/public key or certificate reference. -
+Assigned device name, e.g. LAB-PC-01. - Reported Windows hostname. -
+Device status and registration status. - First registration and
+last-seen timestamps. - Room and group assignment. - Agent version and
+operating-system information. - Administrative notes and
+enabled/disabled state.
+
+Device identity rules: - MAC address is useful inventory information,
+not a secure identity. - MAC addresses can change, be randomized,
+spoofed, or be absent. - A PC can have several interfaces and several
+MAC addresses. - Use a generated persistent device UUID plus a per-agent
+cryptographic identity for authentication. - Keep interface MAC
+addresses in a separate network-interface table. - Allow an
+administrator to rename a PC without changing its identity. - Support
+re-enrollment and controlled identity rotation.
+
+D. NETWORK INTERFACE AND IP INVENTORY Collect and display: - Interface
+name and description. - Interface type where available
+(Ethernet/Wi-Fi/virtual). - MAC address. - IPv4 and IPv6 addresses. -
+Subnet/prefix and gateway when available. - Interface operational
+state. - Last observation time.
+
+Rules: - An IP address is dynamic information, not a device primary
+key. - A device may have multiple IP addresses. - Preserve historical
+IP/interface observations if useful for troubleshooting. - Avoid
+treating VPN/virtual interfaces as physical LAN identity. - Show the
+source and timestamp of each observation.
+
+E. DEVICE DISCOVERY Implement discovery as a supplementary server
+capability: - Optional subnet inventory scan for authorized local
+networks. - ARP neighbour-table observations where available. - Optional
+ICMP reachability checks. - Optional DHCP integration in a later
+phase. - Create an “unmanaged/unknown device” observation, not an
+automatically trusted client registration. - Do not infer that a
+discovered MAC address is a trusted LabGuard agent. - Discovery across
+VLANs requires routing, network equipment integration, or agents on
+those networks. - Do not perform aggressive scanning by default. - Allow
+an administrator to configure approved CIDR ranges and scan rate.
+
+F. CONNECTION STATUS MANAGER Track at least two separate dimensions:
+
+1.  Agent connection:
+    -   CONNECTED
+    -   DISCONNECTED
+    -   NEVER_CONNECTED
+    -   DISABLED
+    -   QUARANTINED / NEEDS_REVIEW (administrative state)
+2.  Network reachability:
+    -   REACHABLE
+    -   UNREACHABLE
+    -   UNKNOWN
+    -   NOT_CHECKED
+
+Recommended initial timing: - Client heartbeat every 10 seconds. - Mark
+agent as delayed after 30 seconds without heartbeat. - Mark agent
+disconnected/offline after 60 seconds without heartbeat. - Make
+thresholds configurable. - Use server receipt time for last-seen
+status. - Do not rely only on client-reported timestamps. - Display last
+heartbeat and last network observation. - Record status transitions for
+history and reports. - Handle server restart and client reconnection
+correctly.
+
+G. ROOM, GROUP, AND GRID MANAGEMENT Room management: - Create, edit,
+archive, and delete rooms. - Room name, description, and optional
+location notes. - Configurable grid rows and columns. - Optional groups,
+e.g. Lab A, Lab B, Teaching PCs. - Assign devices to a room and a grid
+cell.
+
+Grid requirements: - Display a configurable grid representing the room’s
+PCs. - Each cell may contain a device or be empty. - Drag-and-drop
+device placement. - Save row/column position on the server. - Prevent
+two devices occupying the same cell unless explicitly supported. - Allow
+manual naming and sequential naming. - Show
+online/offline/agent-disconnected state with clear visual indicators. -
+Clicking a cell opens a device detail panel. - Provide filters: room,
+group, status, hostname, assigned name, IP, MAC. - Support bulk
+selection and bulk actions. - Provide a list/table view as an accessible
+alternative to the grid. - Do not make grid position depend on a
+device’s IP or MAC address.
+
+Suggested default: - Room: Computer Lab 01. - Grid: 10 columns x 5
+rows. - Device labels: LAB-PC-01 through LAB-PC-50. - Names are assigned
+by the administrator or enrollment workflow, not derived permanently
+from MAC addresses. - MAC suffix may be shown as a secondary identifier
+only.
+
+H. SYSTEM TELEMETRY Receive periodic, bounded telemetry: - CPU
+utilization. - Memory utilization and total/available memory. - Disk
+capacity and free space. - System uptime. - Windows
+edition/version/build. - Hostname. - Agent version. - Network interface
+state and byte counters.
+
+Requirements: - Configurable reporting interval. - Store latest values
+separately from historical samples. - Use retention/aggregation so
+telemetry does not grow indefinitely. - Do not send large raw logs
+continuously. - Show when data was collected and when it was received.
+
+I. SOFTWARE INVENTORY Collect installed software using multiple
+sources: - Windows uninstall registry keys (64-bit and 32-bit
+locations). - Current-user uninstall registry where accessible. - WinGet
+inventory. - Chocolatey inventory when installed. - Optional MSI/product
+metadata from safe registry/API sources.
+
+Inventory fields: - Display name. - Version. - Publisher. - Install
+location, when available. - Install date, when available. - Source of
+detection. - Package identifier, when known. - Last observed time.
+
+Important: - Do not use Win32_Product for inventory; querying it can
+trigger MSI consistency checks or repairs. - Avoid assuming that every
+registry entry is a complete application. - Deduplicate records using
+normalized name/publisher/version/source logic. - Keep package-manager
+inventory distinct from general installed-software inventory. - Track
+snapshots and calculate added, removed, and changed records. - A
+portable application may not appear in the uninstall registry.
+
+J. PACKAGE CATALOG AND SOFTWARE DEPLOYMENT Package catalog: - Search
+WinGet using its CLI/source. - Inspect package metadata using
+winget show. - Support Chocolatey as an additional source. - Cache
+search results and metadata with a refresh timestamp. - Do not clone or
+scrape the entire repository unnecessarily. - Clearly identify package
+source and package ID. - Allow administrators to maintain an approved
+software catalog. - Show publisher, version, source, and available
+installer information where the package manager exposes it.
+
+Deployment: - Select one or multiple devices. - Select package ID,
+version, source, and installation options. - Create a deployment job. -
+Send the job to each selected client. - Track queued, accepted, running,
+succeeded, failed, cancelled, and timed-out states. - Capture exit code
+and sanitized output. - Support retry only with an explicit retry
+policy. - Provide per-device and aggregate deployment results. - Support
+uninstall and upgrade jobs. - Support direct MSI/EXE deployment only
+when the installer is approved, its origin and integrity are verified,
+and its silent arguments are known. - Never assume all EXE installers
+support silent mode. - Require explicit administrator approval for
+elevated installation. - Do not bypass UAC or security prompts.
+
+K. RUNNING APPLICATION / PROCESS INVENTORY Client reports process
+metadata such as: - PID. - Process name. - Executable path when
+accessible. - User/session where available. - Start time where
+available. - Foreground window/application metadata only if enabled and
+disclosed.
+
+Server capabilities: - Search/filter process reports by device. - Show
+currently running processes. - Compare against an
+administrator-maintained restricted-app policy. - Generate an alert when
+a policy match is observed. - Request termination of a selected process
+with an audit record. - Show the result and any access-denied error.
+
+Process termination safeguards: - Use exact process identity and PID
+plus process start-time validation where possible to reduce PID-reuse
+errors. - Do not terminate critical Windows processes. - Use an explicit
+protected-process denylist. - Require appropriate authorization and
+confirmation. - Prefer graceful termination; force termination only when
+explicitly authorized and appropriate. - Terminating a process does not
+prevent it from restarting. - Persistent application restrictions
+require Windows application-control policies such as AppLocker or App
+Control for Business, subject to Windows edition and policy
+requirements.
+
+L. NETWORK MONITORING Collect useful network metadata without attempting
+to decrypt user traffic: - Interface byte/packet counters. - Per-device
+upload/download estimates. - Active local connections where permitted. -
+Local/remote IP and port. - Protocol. - Connection state. - DNS query
+metadata only where lawfully and technically available. - Packet capture
+as an optional, explicitly enabled diagnostic feature. - VPN indicators
+as heuristic alerts, not definitive proof.
+
+Important technical limitations: - A normal switched LAN does not let
+the server see every client’s unicast packet. Use an agent on each PC, a
+managed switch with port mirroring, or an authorized gateway/router
+integration. - Packet capture on a client observes traffic visible at
+that endpoint. - A VPN generally hides inner destinations and DNS from
+the local network observer; the observer normally sees the encrypted
+tunnel endpoint and traffic metadata. - Ports and process names alone
+cannot reliably prove VPN use. - Do not decrypt TLS or VPN traffic. -
+Store metadata, not packet payloads, by default. - Make packet capture
+time-limited, role-restricted, and auditable.
+
+M. JOB / COMMAND QUEUE Use typed, allowlisted jobs instead of arbitrary
+shell command execution.
+
+Suggested job types: - COLLECT_SYSTEM_INFO -
+COLLECT_SOFTWARE_INVENTORY - COLLECT_PROCESS_LIST -
+COLLECT_NETWORK_STATS - INSTALL_PACKAGE - UNINSTALL_PACKAGE -
+UPGRADE_PACKAGE - TERMINATE_PROCESS - RESTART_DEVICE - SHUTDOWN_DEVICE -
+RUN_APPROVED_DIAGNOSTIC
+
+Each job should include: - Job UUID. - Device UUID or target group. -
+Job type. - Validated parameters. - Requesting administrator. - Created
+time and expiry. - Approval state if required. - Idempotency key. -
+Status. - Client acknowledgement. - Start and completion times. - Result
+summary and exit code.
+
+Do not provide an unrestricted “run any command” endpoint in the normal
+administrator UI. If a diagnostic command facility is ever added, it
+must be separately permissioned, allowlisted, logged, and disabled by
+default.
+
+N. AUDIT AND REPORTING Record: - Administrator login events. - Device
+enrollment and identity changes. - Device rename and room/grid
+changes. - Software deployment requests and results. - Process
+termination requests and results. - Policy changes. - Remote
+restart/shutdown. - Packet capture enablement and completion. -
+Authentication failures and security events.
+
+Reports: - Device online/offline history. - Last-seen report. -
+Installed software by PC/room. - Software deployment success/failure. -
+Restricted application detections. - Network usage summaries. -
+Administrator activity. - Agent version distribution.
+
+O. SERVER ADMIN INTERFACE Required pages: 1. Login. 2. Overview
+dashboard. 3. Rooms and PC grid. 4. Device detail. 5. Device inventory.
+6. Running applications. 7. Software catalog. 8. Deployment jobs and
+history. 9. Network monitoring. 10. Policies. 11. Alerts. 12. Audit
+logs. 13. Administrator/user management. 14. Server settings.
+
+Dashboard should show: - Total registered PCs. - Online agents. -
+Disconnected/offline agents. - Devices never connected. - Active
+deployment jobs. - Failed jobs requiring attention. - Software/policy
+alerts. - Recent administrative activity.
+
+======================================================================
+4. PROJECT B: LABGUARD-CLIENT
+======================================================================
+
+4.1 CLIENT RESPONSIBILITIES
+
+The client is a Windows endpoint agent. It: - Enrolls with the server. -
+Maintains a persistent device identity. - Reports hardware, operating
+system, network, and software inventory. - Sends heartbeats. - Receives
+authenticated, typed jobs. - Validates job type and parameters. -
+Executes approved operations. - Reports progress and results. -
+Maintains local logs and reconnects after interruptions.
+
+The client should be designed as a Windows Service plus optional
+interactive user-session helper.
+
+4.2 CLIENT PROCESS ARCHITECTURE
+
+A. WINDOWS SERVICE Runs in the background and handles: - Device identity
+and enrollment. - Secure server connection. - Heartbeats. - Job
+reception and validation. - System inventory. - Software inventory. -
+Process metadata collection. - Network counters and connection
+metadata. - Privileged operations that are appropriate for a service. -
+Local logging and recovery.
+
+B. USER-SESSION HELPER (OPTIONAL) A separate process in the logged-in
+user’s interactive Windows session. It may handle: - Visible
+notifications. - User-session/window enumeration where authorized. -
+Approved GUI automation for installers that genuinely require
+interaction. - User-visible remote assistance integration.
+
+Important: - A Windows Service runs in Session 0 and cannot directly
+interact with the logged-in desktop in the normal way. - Do not attempt
+to bypass Windows session isolation. - GUI automation must run in the
+appropriate interactive user session. - Do not silently click through
+consent, UAC, security, or license prompts. - If unattended installation
+is unavailable, report that manual interaction or an
+administrator-approved response-file workflow is required.
+
+4.3 CLIENT MODULES
+
+A. ENROLLMENT AND IDENTITY At first start: - Generate a persistent
+device UUID. - Generate or provision a per-device cryptographic
+identity. - Obtain an enrollment token or administrator-approved
+enrollment. - Register with server over TLS. - Report hostname, Windows
+version, agent version, and network interfaces. - Receive or confirm
+assigned device name and room assignment. - Store credentials securely
+using Windows DPAPI or certificate store. - Never use MAC address as the
+sole authentication credential.
+
+Re-enrollment: - Support controlled recovery if the client is
+reinstalled. - Require server-side approval for identity replacement. -
+Do not silently create duplicate trusted devices.
+
+B. HEARTBEAT AND CONNECTION - Connect outbound to the configured server
+URL. - Send heartbeat every 10 seconds by default. - Include device
+UUID, agent version, basic health, and sequence number. - Receive server
+time/status where appropriate. - Reconnect after connection loss using
+exponential backoff and jitter. - Persist only necessary pending
+state. - Avoid duplicate job execution after reconnect. - Report
+connection errors without leaking secrets.
+
+C. SYSTEM INFORMATION Collect: - Hostname. - Windows
+edition/version/build. - CPU model and logical core count. - RAM total
+and available. - Disk capacity and free space. - System uptime. - Agent
+version. - Boot time where available.
+
+D. NETWORK INTERFACE INVENTORY Use Windows APIs/psutil to collect: -
+Interface name and description. - MAC address. - IPv4/IPv6 addresses. -
+Gateway and subnet where available. - Interface up/down state. - Byte
+and packet counters. - Interface type where available.
+
+Requirements: - Report all relevant interfaces, not only the first
+adapter. - Mark loopback, virtual, VPN, Wi-Fi, and Ethernet interfaces
+when identification is available. - Do not treat a VPN virtual adapter
+MAC as the permanent PC identity. - Report changes over time. - Handle
+adapters appearing/disappearing. - Respect randomized Wi-Fi MAC
+behaviour.
+
+E. SOFTWARE INVENTORY Sources: - Windows uninstall registry locations. -
+WinGet list. - Chocolatey list, if installed. - Other approved package
+manager integrations later.
+
+Collect: - Name, version, publisher, install path where available. -
+Package ID and source where available. - Detection source. -
+Timestamp. - Inventory snapshot ID.
+
+Requirements: - Run inventory on schedule and when requested. - Cache
+the last successful snapshot. - Avoid running expensive inventory
+commands too frequently. - Do not use Win32_Product. - Normalize and
+deduplicate records. - Report collection errors separately from an empty
+inventory.
+
+F. PACKAGE MANAGER ADAPTERS WinGet: - Check availability and version. -
+Search/show is primarily a server/catalog task. - Use winget list for
+installed package inventory. - Use winget install, uninstall, and
+upgrade only for validated jobs. - Use silent/non-interactive options
+where supported. - Accept package/source agreements only according to
+institutional policy. - Capture exit code, standard output/error,
+duration, and reboot requirement where detectable. - Do not assume
+–silent guarantees the underlying installer is silent.
+
+Chocolatey: - Detect whether Chocolatey is installed. - Collect package
+inventory. - Install/uninstall/upgrade only through validated jobs. -
+Use non-interactive flags where appropriate. - Record package ID,
+version, exit code, and output.
+
+Direct installers: - Support approved MSI/EXE installers as a controlled
+extension. - Verify trusted source and SHA-256 before execution. - Use
+known, documented silent arguments. - Do not guess silent switches. -
+Require elevated approval where needed. - Treat interactive installer as
+a separate workflow. - Do not use coordinate replay as the default
+installation method.
+
+G. PROCESS MONITORING Using psutil and Windows APIs: - Enumerate
+processes. - Collect PID, name, path, user/session when accessible, and
+start time. - Handle AccessDenied and process exit races. - Optionally
+enumerate visible top-level windows separately. - Report process
+snapshots at a configurable interval or on request. - Avoid collecting
+window titles unless explicitly enabled and disclosed. - Match process
+data against server-side policy. - Send detections and evidence
+metadata.
+
+H. PROCESS TERMINATION - Receive a typed TERMINATE_PROCESS job. -
+Validate process name/PID/start time and protected-process rules. - Do
+not terminate critical Windows processes. - Prefer graceful close for an
+application with a window where feasible. - Use terminate/kill only when
+authorized. - Return success, access denied, process not found,
+protected process, or other explicit result. - Record process identity
+and action in the local/server audit logs. - Never claim that
+termination prevents relaunch.
+
+I. NETWORK MONITORING Baseline: - Collect interface bytes/packets
+counters. - Derive upload/download rates from counter differences and
+elapsed time. - Collect active connection metadata using supported
+Windows APIs/psutil. - Report local/remote endpoints, protocol, state,
+PID/process mapping when available and permitted. - Do not claim that
+per-process network attribution is always complete.
+
+Optional packet capture: - Scapy + Npcap or another supported Windows
+capture mechanism. - Explicit enablement by authorized administrator. -
+Time limit, interface selection, capture filter, size limit. - Default
+to headers/metadata and avoid payload storage. - Return capture summary
+and diagnostic status. - Require appropriate permissions and disclose
+capture to users according to institutional policy.
+
+VPN indicators: - Inspect network adapters, routes, known VPN
+processes/services, and connection metadata. - Treat results as
+heuristics with confidence levels. - Do not classify VPN solely from a
+port. - Do not attempt to decrypt VPN traffic.
+
+J. JOB EXECUTION ENGINE - Accept only signed/authenticated jobs from the
+server. - Validate job schema and parameters. - Check expiry and
+idempotency key. - Enforce per-job timeout and resource limits. - Use
+subprocess argument arrays, not unsafe shell string concatenation. -
+Capture output with size limits and redact secrets. - Report
+queued/accepted/running/succeeded/failed/cancelled/timed-out. - Support
+cancellation where safe. - Prevent duplicate execution after
+reconnect. - Store a bounded local job history. - Do not execute unknown
+job types.
+
+K. RESTART AND SHUTDOWN - Only accept explicit authorized job types. -
+Require role/approval rules on server. - Warn logged-in users where
+appropriate. - Apply delay/countdown if configured. - Report that the
+command was accepted before the system shuts down. - Never use this
+capability to disrupt systems outside approved maintenance.
+
+L. LOCAL CONFIGURATION AND LOGGING Configuration: - Server URL. - Device
+UUID. - Client certificate/credential reference. - Heartbeat interval. -
+Telemetry interval. - Inventory interval. - Log level. - Feature
+flags. - Proxy settings if needed.
+
+Security: - Protect configuration and credentials with Windows ACLs and
+DPAPI. - Do not store administrator passwords. - Do not expose local
+control endpoints to the network. - Rotate credentials/certificates
+through a controlled process. - Keep logs bounded and rotate them. -
+Never log tokens, private keys, or sensitive command arguments.
+
+M. CLIENT UPDATER - Report current agent version. - Server can announce
+an approved update. - Verify package signature/hash before
+installation. - Support staged rollout and rollback where possible. - Do
+not self-update from arbitrary URLs. - Log update result. - Keep a
+recovery strategy if an update fails.
+
+======================================================================
+5. DEVICE NAMING, MAC/IP, AND GRID RULES
+======================================================================
+
+Recommended identity hierarchy: 1. Persistent LabGuard device UUID:
+primary database identity. 2. Client cryptographic identity:
+authentication. 3. MAC address: interface inventory attribute. 4. IP
+address: current network location attribute. 5. Hostname: reported
+Windows name. 6. Assigned name: administrator-facing label,
+e.g. LAB-PC-01.
+
+Do not use MAC as the only primary key. A PC may have multiple MAC
+addresses, a network adapter may be replaced, and MAC
+randomization/spoofing is possible.
+
+Naming workflow: - On enrollment, server creates a pending device. -
+Administrator approves it. - Administrator assigns a name or chooses an
+automatic sequence. - Suggested name: LAB-PC-01. - Optional display
+suffix: last six MAC characters. - Renaming does not change device
+UUID. - Name uniqueness should be enforced within the appropriate scope.
+
+Grid workflow: - Create room. - Set row and column count. - Assign
+devices to cells. - Save grid positions on server. - Show a clear state
+legend. - Use real server status, not static or browser-local status. -
+Allow filtering, search, bulk selection, and device detail view. - Grid
+is a visual representation of the physical seating plan only; it does
+not imply camera or physical monitoring.
+
+======================================================================
+6. COMMUNICATION CONTRACT
+======================================================================
+
+6.1 REST API EXAMPLES
+
+Authentication/enrollment: POST /api/v1/enrollment/request POST
+/api/v1/enrollment/approve POST /api/v1/auth/refresh
+
+Devices: GET /api/v1/devices POST /api/v1/devices GET
+/api/v1/devices/{device_id} PATCH /api/v1/devices/{device_id} DELETE
+/api/v1/devices/{device_id} (soft-delete/archive preferred)
+
+Rooms/grid: GET /api/v1/rooms POST /api/v1/rooms PATCH
+/api/v1/rooms/{room_id} PUT /api/v1/rooms/{room_id}/layout POST
+/api/v1/rooms/{room_id}/assignments
+
+Inventory: POST /api/v1/devices/{device_id}/telemetry POST
+/api/v1/devices/{device_id}/interfaces POST
+/api/v1/devices/{device_id}/software-inventory POST
+/api/v1/devices/{device_id}/process-snapshot POST
+/api/v1/devices/{device_id}/network-stats
+
+Jobs: POST /api/v1/jobs GET /api/v1/jobs GET /api/v1/jobs/{job_id} POST
+/api/v1/jobs/{job_id}/cancel POST /api/v1/jobs/{job_id}/approve
+
+Policies: GET /api/v1/policies POST /api/v1/policies PATCH
+/api/v1/policies/{policy_id}
+
+Audit: GET /api/v1/audit-events
+
+6.2 WEBSOCKET EVENTS
+
+Client -> Server: - client.hello - client.heartbeat - client.status -
+inventory.completed - job.accepted - job.progress - job.completed -
+job.failed - network.summary - client.log_event (sanitized and bounded)
+
+Server -> Client: - server.welcome - job.offer - job.cancel -
+config.update - policy.update - agent.update_available - server.ping
+
+Every event should have: - event_id - event_type - device_id -
+timestamp - schema_version - payload
+
+Jobs additionally need: - job_id - idempotency_key - expiry - typed
+parameters - approval reference where required
+
+Validate all payloads. Treat client-reported data as untrusted input.
+
+======================================================================
+7. DATABASE MODEL
+======================================================================
+
+Suggested initial entities:
+
+administrators - id - username - password_hash - role - enabled -
+created_at - last_login_at
+
+devices - id (UUID) - assigned_name - hostname - room_id -
+enrollment_status - agent_version - public_key/certificate reference -
+first_seen_at - last_seen_at - created_at - updated_at - archived_at
+
+device_interfaces - id - device_id - interface_name - description -
+interface_type - mac_address - is_up - last_observed_at
+
+device_ip_addresses - id - interface_id - ip_address - prefix_length -
+gateway - observed_at - valid_until (optional)
+
+rooms - id - name - description - grid_rows - grid_columns - created_at
+
+device_positions - id - room_id - device_id - row_index - column_index -
+updated_at - unique(room_id, row_index, column_index)
+
+device_status - device_id - agent_state - network_state -
+last_heartbeat_at - last_network_check_at - status_changed_at
+
+telemetry_samples - id - device_id - collected_at - received_at -
+cpu_percent - memory_total - memory_available - disk_summary_json -
+uptime_seconds
+
+software_inventory_snapshots - id - device_id - collected_at - source -
+status
+
+software_inventory_items - id - snapshot_id - name - version -
+publisher - package_id - package_source - install_location -
+detection_source
+
+process_snapshots - id - device_id - collected_at - process_data_json or
+normalized child records
+
+network_samples - id - device_id - interface_id - collected_at -
+bytes_sent - bytes_received - packets_sent - packets_received
+
+jobs - id - job_type - requested_by - parameters_json - status -
+created_at - expires_at - approval_status
+
+job_targets - id - job_id - device_id - status - accepted_at -
+started_at - completed_at - exit_code - result_summary
+
+policies - id - name - policy_type - configuration_json - enabled -
+created_by - updated_at
+
+audit_events - id - actor_type - actor_id - device_id - action -
+target - result - timestamp - metadata_json
+
+Database design notes: - Use UUIDs for stable entity IDs. - Add indexes
+for device name, MAC, IP, room, status, timestamps, and job status. -
+MAC addresses and IP addresses must not be assumed globally unique in
+all historical observations. - Use migrations (Alembic). - Use UTC
+timestamps in storage; convert to local time in the UI. - Define
+retention and cleanup jobs. - Use transactions for enrollment, job
+creation, and room/grid changes.
+
+======================================================================
+8. SECURITY AND RELIABILITY REQUIREMENTS
+======================================================================
+
+-   TLS for all client/server communication.
+-   Per-device credentials or certificates.
+-   Server-side revocation of compromised clients.
+-   Admin RBAC.
+-   Password hashing and secure session management.
+-   CSRF protection for cookie-authenticated browser actions.
+-   Rate limits and login lockout controls.
+-   Strict Pydantic validation.
+-   Parameterized database queries through ORM.
+-   No unrestricted shell command execution.
+-   Typed and allowlisted client jobs.
+-   Signed/verified agent updates.
+-   Hash/signature verification for installer artifacts.
+-   Audit all privileged actions.
+-   Protect logs and redact secrets.
+-   Validate device and administrator permissions on every operation.
+-   Use least privilege; do not run the whole client as SYSTEM unless a
+    specific operation requires it.
+-   Use a narrowly scoped privileged service and a separate user-session
+    helper where possible.
+-   Provide a visible service/agent identity and documented monitoring
+    policy.
+-   Fail closed for invalid jobs and authentication errors.
+-   Do not treat a MAC address, hostname, or IP as proof of identity.
+
+Reliability: - Client reconnect with exponential backoff and jitter. -
+Job idempotency and expiry. - Bounded queues and output sizes. -
+Database backups. - Health and readiness checks. - Graceful server
+shutdown. - Local client log rotation. - Server-side retention
+policies. - Handle partial telemetry and intermittent network access. -
+Version every API/event schema.
+
+======================================================================
+9. RECOMMENDED REPOSITORY STRUCTURES
+======================================================================
+
+PROJECT A: labguard-server/
+
+labguard-server/ pyproject.toml README.md .env.example alembic.ini
+migrations/ src/ labguard_server/ main.py config.py logging_config.py
+
+      api/
+        dependencies.py
+        v1/
+          auth.py
+          enrollment.py
+          devices.py
+          rooms.py
+          grid.py
+          inventory.py
+          processes.py
+          network.py
+          packages.py
+          jobs.py
+          policies.py
+          reports.py
+          audit.py
+
+      websocket/
+        manager.py
+        client_handler.py
+        event_schemas.py
+
+      core/
+        security.py
+        permissions.py
+        exceptions.py
+        status_manager.py
+        job_dispatcher.py
+        discovery.py
+        audit.py
+
+      models/
+        administrator.py
+        device.py
+        network_interface.py
+        room.py
+        job.py
+        inventory.py
+        policy.py
+        audit_event.py
+
+      schemas/
+        auth.py
+        device.py
+        room.py
+        telemetry.py
+        inventory.py
+        job.py
+        network.py
+
+      repositories/
+        device_repository.py
+        room_repository.py
+        job_repository.py
+        inventory_repository.py
+        audit_repository.py
+
+      services/
+        enrollment_service.py
+        device_service.py
+        room_service.py
+        grid_service.py
+        inventory_service.py
+        package_catalog_service.py
+        deployment_service.py
+        process_service.py
+        network_service.py
+        reporting_service.py
+
+      integrations/
+        winget_catalog.py
+        chocolatey_catalog.py
+
+      web/
+        templates/
+        static/
+        routes/
+
+tests/ unit/ integration/ security/ scripts/ docs/
+
+PROJECT B: labguard-client/
+
+labguard-client/ pyproject.toml README.md .env.example src/
+labguard_client/ main.py config.py service.py logging_config.py
+
+      identity/
+        device_identity.py
+        enrollment.py
+        credential_store.py
+
+      communication/
+        api_client.py
+        websocket_client.py
+        reconnect.py
+        event_protocol.py
+
+      collectors/
+        system_info.py
+        network_interfaces.py
+        software_inventory.py
+        process_inventory.py
+        network_stats.py
+        active_connections.py
+
+      package_managers/
+        base.py
+        winget.py
+        chocolatey.py
+        direct_installer.py
+
+      executor/
+        job_router.py
+        validators.py
+        idempotency.py
+        timeout.py
+        result_reporter.py
+
+      operations/
+        install.py
+        uninstall.py
+        upgrade.py
+        terminate_process.py
+        restart.py
+        shutdown.py
+        diagnostics.py
+
+      security/
+        job_verification.py
+        protected_processes.py
+        artifact_verification.py
+        local_permissions.py
+
+      ipc/
+        service_helper_protocol.py
+
+      user_session/
+        main.py
+        notifications.py
+        gui_automation.py
+
+tests/ unit/ integration/ windows/ packaging/ pyinstaller.spec
+installer/ scripts/ docs/
+
+Keep shared protocol definitions versioned and documented. If a third
+shared Python package is introduced later, it should be a library
+dependency, not a third deployable application.
+
+======================================================================
+10. DEVELOPMENT ROADMAP
+======================================================================
+
+PHASE 0 - DESIGN AND PROTOCOL - Confirm Windows versions and server
+hosting environment. - Define device identity and enrollment. - Define
+REST schemas and WebSocket event schemas. - Define job types and
+authorization matrix. - Define database migrations. - Create threat
+model and deployment assumptions.
+
+Acceptance: - Server and client can exchange a validated hello/heartbeat
+event in a local development environment.
+
+PHASE 1 - SERVER FOUNDATION - FastAPI project. - Database and Alembic. -
+Admin authentication and roles. - Device registry. - Room CRUD and grid
+layout. - Device detail page. - Audit event foundation.
+
+Acceptance: - Administrator can create a room, view an empty grid, and
+approve a device.
+
+PHASE 2 - CLIENT FOUNDATION - Windows service skeleton. - Persistent
+device UUID and credential storage. - Enrollment flow. - WebSocket
+connection. - Heartbeat and reconnect. - System/OS information
+collector. - Network interface/MAC/IP collector.
+
+Acceptance: - A client enrolls, appears in the server grid, and updates
+its last-seen status without manual database edits.
+
+PHASE 3 - CONNECTION AND GRID - Online/disconnected/offline state
+machine. - Configurable heartbeat thresholds. - Last-seen and status
+history. - Room assignment. - PC naming. - Drag-and-drop grid
+position. - Search, filters, and list view.
+
+Acceptance: - 50 simulated or real clients can appear in the grid and
+their status changes correctly when agents stop, reconnect, or lose
+connectivity.
+
+PHASE 4 - INVENTORY - Registry software inventory. - WinGet inventory. -
+Chocolatey inventory. - Process inventory. - Telemetry. - Snapshot
+comparison and retention.
+
+Acceptance: - Administrator can inspect installed software and running
+processes for a selected device and identify inventory changes.
+
+PHASE 5 - SOFTWARE DEPLOYMENT - WinGet package catalog search/show. -
+Chocolatey package support. - Approved package catalog. - Typed
+install/uninstall/upgrade jobs. - Per-device result tracking. - Bulk
+deployment and cancellation. - Installer verification and reboot
+handling.
+
+Acceptance: - Administrator can deploy an approved package to selected
+PCs and see accurate per-device success/failure results.
+
+PHASE 6 - PROCESS AND POLICY MANAGEMENT - Running-process view. -
+Restricted application policy. - Alerts. - Authorized process
+termination. - Protected-process safeguards. - Policy audit history.
+
+Acceptance: - Administrator can detect a configured restricted process
+and request an authorized termination on a test PC.
+
+PHASE 7 - NETWORK MONITORING - Interface counters. - Upload/download
+rate calculation. - Active connection metadata. - Optional packet
+capture. - VPN heuristic indicators. - Network reports and retention.
+
+Acceptance: - Dashboard displays per-PC traffic summaries and clearly
+distinguishes observed facts from heuristic VPN indicators.
+
+PHASE 8 - REMOTE ADMINISTRATION - Restart/shutdown jobs. - Approved
+diagnostics. - User-session helper. - Visible GUI automation for
+supported installer workflows. - Remote assistance integration, if
+required.
+
+Acceptance: - Authorized administrator can perform a logged maintenance
+action and see its result.
+
+PHASE 9 - HARDENING AND RELEASE - Installer and service packaging. -
+Code signing strategy. - Secure update process. - Database
+backup/restore. - Load testing. - Security testing. - Documentation and
+administrator guide. - Recovery/uninstall procedure.
+
+======================================================================
+11. TESTING PLAN
+======================================================================
+
+Server tests: - Authentication and role permissions. - Device enrollment
+and revocation. - Duplicate device registration. - MAC changes and
+multiple interfaces. - Multiple IP addresses. - Heartbeat timeout
+transitions. - Room/grid collision handling. - Job expiry, cancellation,
+retry, and duplicate delivery. - Invalid client payloads. - Database
+migration and restore. - Audit completeness.
+
+Client tests: - No network at startup. - Server restart and reconnect. -
+DHCP address change. - Multiple adapters. - Missing WinGet/Chocolatey. -
+Registry access denied. - Process exits during enumeration. - Protected
+process termination refusal. - Installer failure and timeout. -
+Duplicate job delivery. - Expired/invalid job rejection. - Windows
+service restart. - User-session helper unavailable.
+
+Fleet tests: - 50 clients connecting at once. - 50 clients sending
+heartbeat every 10 seconds. - Bulk job distribution. - Server restart
+while clients are connected. - Temporary LAN interruption. - Database
+backup and recovery. - Telemetry retention and query performance.
+
+======================================================================
+12. FIRST RELEASE: MINIMUM VIABLE PRODUCT
+======================================================================
+
+Do not attempt every feature in the first implementation.
+
+MVP SERVER: 1. Admin login. 2. Device registry. 3. Device enrollment
+approval. 4. MAC/IP/interface inventory. 5. Room management. 6.
+Configurable PC grid. 7. Online/offline/agent status. 8. Device details.
+9. System telemetry. 10. Audit logs. 11. WebSocket job delivery
+foundation.
+
+MVP CLIENT: 1. Windows service. 2. Persistent device UUID. 3. Secure
+enrollment. 4. Heartbeat. 5. Hostname and Windows information. 6.
+MAC/IP/interface collection. 7. CPU/RAM/disk telemetry. 8. Reconnect
+logic. 9. Local logging. 10. Authenticated job reception (initially
+read-only diagnostics).
+
+Second release: - Installed software inventory. - WinGet/Chocolatey
+inventory. - Running processes. - Package catalog. - Software
+install/uninstall/upgrade. - Deployment history.
+
+Third release: - Process termination and policy management. - Network
+connections and bandwidth. - Optional packet capture. - VPN
+indicators. - Restart/shutdown. - Approved GUI automation and remote
+assistance.
+
+======================================================================
+13. IMPORTANT IMPLEMENTATION RULES FOR THE CODING AGENT
+======================================================================
+
+1.  Build the server and client as two separate repositories/projects.
+2.  Both projects must be Python-based.
+3.  Do not start by implementing every feature. Follow the roadmap.
+4.  First establish the protocol, device identity, enrollment, and
+    heartbeat.
+5.  Use type hints, Pydantic models, clear interfaces, and modular code.
+6.  Use SQLAlchemy and Alembic for server persistence.
+7.  Keep business logic out of FastAPI route handlers.
+8.  Keep Windows-specific code behind client-side adapters.
+9.  Do not use MAC or IP as the sole device identity.
+10. Treat client-reported values as untrusted.
+11. Do not implement arbitrary remote shell execution.
+12. Use typed, validated, allowlisted jobs.
+13. Every privileged operation must be authorized and audited.
+14. Do not use Win32_Product for software inventory.
+15. Do not assume every EXE supports silent installation.
+16. Do not assume the server can sniff all switched-LAN client traffic.
+17. Do not attempt to decrypt HTTPS or VPN traffic.
+18. A Windows Service cannot directly control the interactive desktop;
+    use a separate user-session helper for approved GUI tasks.
+19. Keep credentials in secure Windows storage.
+20. Include unit and integration tests with each module.
+21. Provide README files, setup instructions, configuration examples,
+    and migration instructions.
+22. Never fabricate successful execution results. Report exact failures.
+23. Use UTC timestamps internally.
+24. Make intervals, thresholds, retention, and feature flags
+    configurable.
+25. Keep API and WebSocket schemas versioned.
+26. Prefer simple, maintainable architecture over premature complexity.
+
+======================================================================
+14. INITIAL BUILD ORDER
+======================================================================
+
+The coding agent should implement in this exact order:
+
+TASK 1: Create both project skeletons and document the protocol.
+
+TASK 2: Implement server database, administrator authentication, and
+device models.
+
+TASK 3: Implement client persistent identity and secure enrollment.
+
+TASK 4: Implement WebSocket hello, heartbeat, acknowledgement, and
+reconnect.
+
+TASK 5: Implement server connection state and last-seen logic.
+
+TASK 6: Implement network interface, MAC, IP, hostname, and system
+information collection.
+
+TASK 7: Implement room creation, device naming, grid placement, and live
+grid UI.
+
+TASK 8: Test with multiple clients and simulated disconnects.
+
+TASK 9: Implement software and process inventory.
+
+TASK 10: Implement package catalog and controlled deployment jobs.
+
+Do not move to later tasks until the current task has tests and a
+working end-to-end demonstration.
+
+END OF SPECIFICATION
