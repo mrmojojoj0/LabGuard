@@ -16,6 +16,9 @@ class Settings:
     offline_after_seconds: float = 60.0
     device_challenge_ttl_seconds: int = 30
     device_ticket_ttl_seconds: int = 30
+    telemetry_retention_days: int = 30
+    telemetry_stale_after_seconds: int = 120
+    telemetry_min_interval_seconds: float = 10.0
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -32,6 +35,9 @@ class Settings:
             offline_after_seconds=float(os.getenv("DEVICE_OFFLINE_AFTER_SECONDS", "60")),
             device_challenge_ttl_seconds=int(os.getenv("DEVICE_CHALLENGE_TTL_SECONDS", "30")),
             device_ticket_ttl_seconds=int(os.getenv("DEVICE_TICKET_TTL_SECONDS", "30")),
+            telemetry_retention_days=int(os.getenv("TELEMETRY_RETENTION_DAYS", "30")),
+            telemetry_stale_after_seconds=int(os.getenv("TELEMETRY_STALE_AFTER_SECONDS", "120")),
+            telemetry_min_interval_seconds=float(os.getenv("TELEMETRY_MIN_INTERVAL_SECONDS", "10")),
         )
 
     def validate(self) -> None:
@@ -45,3 +51,6 @@ class Settings:
             raise RuntimeError("Require 0 < heartbeat interval < delayed threshold < offline threshold")
         if self.device_challenge_ttl_seconds < 1 or self.device_ticket_ttl_seconds < 1:
             raise RuntimeError("Device challenge and ticket TTLs must be positive")
+        if not (1 <= self.telemetry_retention_days <= 3650 and 1 <= self.telemetry_stale_after_seconds <= 86400
+                and 1 <= self.telemetry_min_interval_seconds <= 3600):
+            raise RuntimeError("Telemetry retention, stale threshold, and minimum interval are outside supported bounds")

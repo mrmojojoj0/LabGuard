@@ -22,12 +22,16 @@ def main():
     run = sub.add_parser("run", help="Connect and send authenticated heartbeats")
     run.add_argument("--server", required=True)
     run.add_argument("--state-dir", default=os.getenv("PROGRAMDATA", str(Path.home())) + "/LabGuard")
+    run.add_argument("--telemetry-interval-seconds", type=float,
+                     default=float(os.getenv("LABGUARD_TELEMETRY_INTERVAL_SECONDS", "30")))
     run.add_argument("--insecure-dev", action="store_true", help="Allow plaintext HTTP for local development only")
     enroll.add_argument("--insecure-dev", action="store_true", help="Allow plaintext HTTP for local development only")
     service = sub.add_parser("service", help="Prepare or manage the Windows Service")
     service.add_argument("action", choices=("prepare", "install", "uninstall", "start", "stop", "restart", "status"))
     service.add_argument("--server")
     service.add_argument("--state-dir", default=os.getenv("PROGRAMDATA", str(Path.home())) + "/LabGuard")
+    service.add_argument("--telemetry-interval-seconds", type=float,
+                          default=float(os.getenv("LABGUARD_TELEMETRY_INTERVAL_SECONDS", "30")))
     args = parser.parse_args()
     state_dir = Path(args.state_dir)
     if args.command == "service":
@@ -37,7 +41,7 @@ def main():
             if not args.server:
                 parser.error("service prepare requires --server https://...")
             from labguard_client.windows_service import prepare_service
-            print(f"Prepared service configuration: {prepare_service(args.server, state_dir)}")
+            print(f"Prepared service configuration: {prepare_service(args.server, state_dir, args.telemetry_interval_seconds)}")
         else:
             from labguard_client.windows_service import service_command
             print(service_command(args.action))
@@ -49,7 +53,8 @@ def main():
         identity = DeviceIdentity.load_existing(state_dir)
     else:
         identity = DeviceIdentity.load_or_create(state_dir)
-    client = AgentClient(args.server, identity, allow_insecure_dev=args.insecure_dev)
+    client = AgentClient(args.server, identity, allow_insecure_dev=args.insecure_dev,
+                         telemetry_interval_seconds=args.telemetry_interval_seconds if args.command == "run" else 30)
     if args.command == "enroll":
         result = client.enroll(args.code or getpass("One-time enrollment code: "))
         print(f"Enrollment submitted: device_id={result['id']} state={result['enrollment_state']}")

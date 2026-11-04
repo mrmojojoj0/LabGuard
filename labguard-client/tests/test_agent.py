@@ -180,3 +180,62 @@ def test_service_configuration_validation_and_persistence(tmp_path):
         AgentConfig("https://admin:password@labguard.example.test", tmp_path)
     with pytest.raises(ValueError, match="absolute"):
         AgentConfig("https://labguard.example.test", Path("relative"))
+    with pytest.raises(ValueError, match="telemetry_interval"):
+        AgentConfig("https://labguard.example.test", tmp_path, telemetry_interval_seconds=5)
+
+
+def test_telemetry_collection_fields_and_missing_information(monkeypatch):
+    from types import SimpleNamespace
+    import labguard_client.telemetry as telemetry
+
+    monkeypatch.setattr(telemetry.psutil, "cpu_percent", lambda interval=None: 22.5)
+    monkeypatch.setattr(telemetry.psutil, "virtual_memory", lambda: SimpleNamespace(total=1000, used=400, available=600, percent=40.0))
+    monkeypatch.setattr(telemetry.psutil, "boot_time", lambda: 1000.0)
+    monkeypatch.setattr(telemetry.psutil, "cpu_count", lambda logical=True: 4 if logical else 2)
+    monkeypatch.setattr(telemetry.psutil, "disk_partitions", lambda all=False: [])
+    monkeypatch.setattr(telemetry.psutil, "net_if_addrs", lambda: {})
+    monkeypatch.setattr(telemetry.psutil, "net_if_stats", lambda: {})
+    monkeypatch.setattr(telemetry, "_processor_name", lambda: None)
+    monkeypatch.setattr(telemetry, "_windows_edition", lambda: None)
+    monkeypatch.setattr(telemetry.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(telemetry.platform, "win32_ver", lambda: ("", "", "", ""))
+    monkeypatch.setattr("labguard_client.telemetry.time.time", lambda: 2000.0)
+    result = telemetry.collect_system_telemetry()
+    assert result["cpu"] == {"processor_name": None, "logical_processors": 4, "physical_cores": 2, "utilization_percent": 22.5}
+    assert result["storage_partitions"] == []
+    assert result["network_interfaces"] == []
+    assert result["operating_system"]["edition"] is None
+    assert result["uptime_seconds"] == 1000
+    assert result["collected_at"] and result["boot_time"]
+
+
+def test_telemetry_collects_disk_and_interface_details(monkeypatch):
+    from types import SimpleNamespace
+    import socket
+    import labguard_client.telemetry as telemetry
+
+    partition = SimpleNamespace(device="C:\\", mountpoint="C:\\", fstype="NTFS")
+    addresses = [SimpleNamespace(family=socket.AF_INET, address="192.0.2.8"),
+                 SimpleNamespace(family=socket.AF_INET6, address="2001:db8::8%12"),
+                 SimpleNamespace(family=getattr(telemetry.psutil, "AF_LINK", -1), address="AA:BB:CC:DD:EE:FF")]
+    monkeypatch.setattr(telemetry.psutil, "cpu_percent", lambda interval=None: 5.0)
+    monkeypatch.setattr(telemetry.psutil, "virtual_memory", lambda: SimpleNamespace(total=1000, used=250, available=750, percent=25.0))
+    monkeypatch.setattr(telemetry.psutil, "boot_time", lambda: 1000.0)
+    monkeypatch.setattr(telemetry.psutil, "cpu_count", lambda logical=True: 4 if logical else 2)
+    monkeypatch.setattr(telemetry.psutil, "disk_partitions", lambda all=False: [partition])
+    monkeypatch.setattr(telemetry.psutil, "disk_usage", lambda _path: SimpleNamespace(total=1000, used=400, free=600, percent=40.0))
+    monkeypatch.setattr(telemetry.psutil, "net_if_addrs", lambda: {"Ethernet": addresses})
+    monkeypatch.setattr(telemetry.psutil, "net_if_stats", lambda: {"Ethernet": SimpleNamespace(isup=True, speed=1000)})
+    monkeypatch.setattr(telemetry, "_processor_name", lambda: "Test Processor")
+    monkeypatch.setattr(telemetry, "_windows_edition", lambda: "Windows Education")
+    monkeypatch.setattr(telemetry.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(telemetry.platform, "win32_ver", lambda: ("Windows", "10.0", "", ""))
+
+    result = telemetry.collect_system_telemetry()
+    assert result["storage_partitions"][0]["utilization_percent"] == 40
+    interface = result["network_interfaces"][0]
+    assert interface["status"] == "UP" and interface["speed_mbps"] == 1000
+    assert interface["ipv4_addresses"] == ["192.0.2.8"]
+    assert interface["ipv6_addresses"] == ["2001:db8::8"]
+    assert interface["mac_address"] == "AA:BB:CC:DD:EE:FF"
+    assert result["operating_system"]["edition"] == "Windows Education"

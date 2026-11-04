@@ -2,7 +2,7 @@ from uuid import UUID
 from time import monotonic
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,6 +15,7 @@ from labguard_server.security import csrf_protected, digest, require_role
 from labguard_server.services import (approve_device, audit, authenticate, create_enrollment_code, create_room,
                                       create_device_challenge, issue_device_ticket, save_layout, submit_enrollment,
                                       update_room)
+from labguard_server.telemetry import latest_telemetry, telemetry_history, telemetry_summary
 
 router = APIRouter(prefix="/api/v1")
 _login_failures: dict[str, list[float]] = {}
@@ -154,6 +155,27 @@ def device_status(device_id: UUID, request: Request, _admin=Depends(require_role
             "last_seen_at": device.last_seen_at.isoformat() if device.last_seen_at else None,
             "changed_at": status_row.changed_at.isoformat(),
             "connected": device_id in request.app.state.active_devices}
+
+
+@router.get("/devices/{device_id}/telemetry")
+def device_telemetry(device_id: UUID, request: Request, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    if db.get(Device, device_id) is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Device not found"})
+    return latest_telemetry(db, device_id, request.app.state.settings.telemetry_stale_after_seconds)
+
+
+@router.get("/devices/{device_id}/telemetry/history")
+def device_telemetry_history(device_id: UUID, request: Request, limit: int = Query(default=120, ge=1, le=500),
+                             _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    if db.get(Device, device_id) is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Device not found"})
+    return {"device_id": str(device_id), "samples": telemetry_history(
+        db, device_id, limit, request.app.state.settings.telemetry_retention_days)}
+
+
+@router.get("/telemetry/summary")
+def telemetry_overview(request: Request, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    return telemetry_summary(db, request.app.state.settings.telemetry_stale_after_seconds)
 
 
 @router.get("/rooms/{room_id}/layout", response_model=LayoutOut)

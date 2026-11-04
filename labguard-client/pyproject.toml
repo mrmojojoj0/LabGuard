@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
   "cryptography>=43,<47",
   "websockets>=15,<16",
+  "psutil>=6,<8",
 ]
 
 [project.optional-dependencies]

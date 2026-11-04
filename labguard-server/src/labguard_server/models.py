@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from labguard_server.db import Base
@@ -87,6 +87,46 @@ class DeviceStatusEvent(Base):
     new_state: Mapped[str] = mapped_column(String(20), index=True)
     reason: Mapped[str] = mapped_column(String(50))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
+
+
+class DeviceTelemetryLatest(Base):
+    __tablename__ = "device_telemetry_latest"
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    processor_name: Mapped[str | None] = mapped_column(String(256))
+    logical_processors: Mapped[int] = mapped_column(Integer)
+    physical_cores: Mapped[int | None] = mapped_column(Integer)
+    cpu_percent: Mapped[float] = mapped_column(Float)
+    memory_total_bytes: Mapped[int] = mapped_column(BigInteger)
+    memory_used_bytes: Mapped[int] = mapped_column(BigInteger)
+    memory_available_bytes: Mapped[int] = mapped_column(BigInteger)
+    memory_percent: Mapped[float] = mapped_column(Float)
+    storage_partitions: Mapped[list] = mapped_column(JSON)
+    windows_edition: Mapped[str | None] = mapped_column(String(128))
+    os_version: Mapped[str | None] = mapped_column(String(128))
+    build_number: Mapped[str | None] = mapped_column(String(64))
+    architecture: Mapped[str] = mapped_column(String(64))
+    hostname: Mapped[str] = mapped_column(String(255))
+    boot_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    uptime_seconds: Mapped[float] = mapped_column(Float)
+    network_interfaces: Mapped[list] = mapped_column(JSON)
+
+
+class TelemetrySample(Base):
+    __tablename__ = "telemetry_samples"
+    __table_args__ = (Index("ix_telemetry_device_received", "device_id", "received_at"),)
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    cpu_percent: Mapped[float] = mapped_column(Float)
+    memory_used_bytes: Mapped[int] = mapped_column(BigInteger)
+    memory_total_bytes: Mapped[int] = mapped_column(BigInteger)
+    memory_percent: Mapped[float] = mapped_column(Float)
+    disk_used_bytes: Mapped[int] = mapped_column(BigInteger)
+    disk_total_bytes: Mapped[int] = mapped_column(BigInteger)
+    disk_percent: Mapped[float | None] = mapped_column(Float)
 
 
 class DeviceAuthChallenge(Base):

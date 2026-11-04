@@ -28,11 +28,12 @@ def _require_windows():
     return win32service, win32serviceutil
 
 
-def prepare_service(server_url: str, state_dir: Path) -> Path:
+def prepare_service(server_url: str, state_dir: Path, telemetry_interval_seconds: float = 30.0) -> Path:
     """Migrate existing user-DPAPI identity to machine DPAPI; refuse missing identity."""
     from labguard_client.windows_security import secure_state_directory
 
-    config = AgentConfig(server_url=server_url, state_dir=state_dir.resolve())
+    config = AgentConfig(server_url=server_url, state_dir=state_dir.resolve(),
+                         telemetry_interval_seconds=telemetry_interval_seconds)
     identity_path = state_dir / "identity.json"
     if not identity_path.is_file():
         raise FileNotFoundError(f"No existing device identity at {identity_path}; enroll and approve this device first")
@@ -138,7 +139,8 @@ if os.name == "nt":
                     self._async_stop.set()
                 self.ReportServiceStatus(win32service.SERVICE_RUNNING)
                 logger.info("Windows service started")
-                client = AgentClient(config.server_url, identity, timeout=config.timeout)
+                client = AgentClient(config.server_url, identity, timeout=config.timeout,
+                                     telemetry_interval_seconds=config.telemetry_interval_seconds)
                 self._loop.run_until_complete(client.run_forever(self._async_stop))
             except Exception as exc:
                 logger.error("Windows service terminated with %s", type(exc).__name__)

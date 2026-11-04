@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from labguard_server.models import now_utc
 from labguard_server.services import claim_device_ticket, record_agent_event
+from labguard_server.schemas import TelemetrySnapshotIn
+from labguard_server.telemetry import consume_rejected_telemetry_sequence, purge_expired_telemetry, record_telemetry
 
 router = APIRouter(prefix="/api/v1")
 MAX_FRAME_BYTES = 64 * 1024
@@ -43,6 +45,16 @@ def _record(device_id: UUID, sequence: int, event_type: str, websocket: WebSocke
             websocket.app.state.admin_events.publish({"type": "device.status", "device_id": str(device_id),
                 "agent_state": current.agent_state, "changed_at": current.changed_at.isoformat()})
         return received_at
+
+
+def _persist_telemetry(factory, device_id, sequence, payload, minimum_interval, retention_days):
+    with factory() as db:
+        return record_telemetry(db, device_id, sequence, payload, minimum_interval, retention_days)
+
+
+def _consume_invalid_telemetry(factory, device_id, sequence):
+    with factory() as db:
+        consume_rejected_telemetry_sequence(db, device_id, sequence)
 
 
 def _parse(text: str) -> ClientEnvelope:
@@ -119,9 +131,46 @@ async def agent_session(websocket: WebSocket):
             except ValueError:
                 await websocket.close(code=4400, reason="invalid_or_oversized_frame")
                 return
-            if event.device_id != device_id or event.type != "client.heartbeat":
+            if event.device_id != device_id:
+                await websocket.close(code=4401, reason="authenticated_device_mismatch")
+                return
+            if event.type not in {"client.heartbeat", "client.telemetry"}:
                 await websocket.close(code=4400, reason="unsupported_event")
                 return
+            if event.type == "client.telemetry":
+                try:
+                    payload = TelemetrySnapshotIn.model_validate(event.payload)
+                except ValidationError:
+                    try:
+                        await asyncio.to_thread(_consume_invalid_telemetry, websocket.app.state.session_factory,
+                                                device_id, event.sequence)
+                    except HTTPException:
+                        await websocket.close(code=4401, reason="device_not_authorized_or_replayed")
+                        return
+                    await _send(websocket, device_id, "server.ack", {"event_id": str(event.event_id),
+                        "accepted": False, "reason": "invalid_telemetry"})
+                    continue
+                try:
+                    received_at, reason = await asyncio.to_thread(_persist_telemetry,
+                        websocket.app.state.session_factory, device_id, event.sequence, payload,
+                        websocket.app.state.settings.telemetry_min_interval_seconds,
+                        websocket.app.state.settings.telemetry_retention_days)
+                except HTTPException:
+                    await websocket.close(code=4401, reason="device_not_authorized_or_replayed")
+                    return
+                except Exception:
+                    logging.getLogger("labguard_server.websocket").exception("Failed storing device telemetry")
+                    await _send(websocket, device_id, "server.ack", {"event_id": str(event.event_id),
+                        "accepted": False, "reason": "telemetry_storage_error"})
+                    continue
+                accepted = received_at is not None
+                if accepted:
+                    websocket.app.state.admin_events.publish({"type": "device.telemetry",
+                        "device_id": str(device_id), "received_at": received_at.isoformat()})
+                await _send(websocket, device_id, "server.ack", {"event_id": str(event.event_id),
+                    "accepted": accepted, "server_received_at": received_at.isoformat() if accepted else None,
+                    "reason": reason})
+                continue
             try:
                 received_at = _record(device_id, event.sequence, "client.heartbeat", websocket)
             except HTTPException:
@@ -153,3 +202,16 @@ async def status_monitor(application):
                 application.state.admin_events.publish({"type": "device.status", "device_id": str(device_id),
                     "previous_state": previous, "agent_state": desired, "changed_at": changed_at.isoformat()})
             refresh_device_states(db, settings.delayed_after_seconds, settings.offline_after_seconds, emit_change)
+
+
+async def telemetry_retention_monitor(application):
+    settings = application.state.settings
+    while True:
+        try:
+            def purge():
+                with application.state.session_factory() as db:
+                    purge_expired_telemetry(db, settings.telemetry_retention_days)
+            await asyncio.to_thread(purge)
+        except Exception:
+            logging.getLogger("labguard_server.telemetry").exception("Telemetry retention cleanup failed")
+        await asyncio.sleep(3600)

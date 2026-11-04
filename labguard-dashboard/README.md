@@ -38,10 +38,11 @@ npm run preview
 
 - `POST /api/v1/auth/login`, `GET /auth/me`, `POST /auth/logout` with the server-managed HttpOnly cookie and CSRF token returned at login. CSRF token is kept only in tab-scoped `sessionStorage` so reloads in that tab retain mutation support; passwords and cookie secrets are never stored by JavaScript.
 - `GET /devices` and `GET /devices/{id}/status` for fleet list, profile, overview counts, connection state, and event-driven status refresh.
+- `GET /devices/{id}/telemetry`, `GET /devices/{id}/telemetry/history`, and `GET /telemetry/summary` for the current system snapshot, bounded history, and live fleet aggregates.
 - `GET /rooms`, `POST /rooms`, `PATCH /rooms/{id}` for room list and authorized room dimension/name/description editing.
 - `GET /enrollment/requests`, approval/rejection endpoints, and `POST /enrollment-codes` for Lab Admin and above.
 - `GET /audit-events?limit=25` for audit activity.
 
 The dashboard receives authenticated status and connection events from the separate administrator Server-Sent Events endpoint `/api/v1/admin/events`; the device WebSocket at `/api/v1/agent/session` remains restricted to device tickets. EventSource reconnects after a dropped stream. Room assignments can be read and saved through `/api/v1/rooms/{id}/layout`; the dashboard provides an editor for approved devices and grid positions.
 
-Software/process/network/USB/remote access pages and telemetry detail remain unavailable because those APIs are not implemented. See `docs/LabGuard_LAN_Deployment.md` for local, LAN and production preparation guidance.
+Software/process/USB/remote access pages remain unavailable because those APIs are not implemented. Device details now show current telemetry, metric history, storage, and interfaces; the overview shows fleet telemetry aggregates. See `docs/LabGuard_LAN_Deployment.md` for local, LAN and production preparation guidance.

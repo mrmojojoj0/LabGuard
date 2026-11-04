@@ -37,8 +37,14 @@ function AdminEventBridge() {
       void queryClient.invalidateQueries({ queryKey: ['statuses'] })
       void queryClient.invalidateQueries({ queryKey: ['devices'] })
     }
+    const refreshTelemetry = () => {
+      void queryClient.invalidateQueries({ queryKey: ['telemetry'] })
+      void queryClient.invalidateQueries({ queryKey: ['telemetry-history'] })
+      void queryClient.invalidateQueries({ queryKey: ['telemetry-summary'] })
+    }
     stream.addEventListener('device.status', refresh)
     stream.addEventListener('device.connection', refresh)
+    stream.addEventListener('device.telemetry', refreshTelemetry)
     return () => stream.close()
   }, [admin, queryClient])
   return null

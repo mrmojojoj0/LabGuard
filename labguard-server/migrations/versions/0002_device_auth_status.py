@@ -7,7 +7,8 @@ from alembic import op
 import sqlalchemy as sa
 
 from labguard_server.db import Base
-from labguard_server import models  # noqa: F401
+from labguard_server.models import (DeviceAuthChallenge, DeviceCredential, DeviceStatus,
+                                    DeviceStatusEvent, DeviceTicket)
 
 revision = "0002_device_auth_status"
 down_revision = "0001_initial"
@@ -18,8 +19,12 @@ depends_on = None
 def upgrade():
     op.add_column("devices", sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True))
     op.create_index("ix_devices_last_seen_at", "devices", ["last_seen_at"])
-    # Create only the new tables; existing tables are migrated explicitly above.
-    Base.metadata.create_all(bind=op.get_bind(), checkfirst=True)
+    # Pin this revision to its own tables so models added by later revisions are
+    # not created early by the current ORM metadata.
+    Base.metadata.create_all(bind=op.get_bind(), tables=[
+        DeviceCredential.__table__, DeviceStatus.__table__, DeviceStatusEvent.__table__,
+        DeviceAuthChallenge.__table__, DeviceTicket.__table__,
+    ], checkfirst=True)
 
 
 def downgrade():

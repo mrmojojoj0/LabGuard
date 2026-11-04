@@ -9,6 +9,7 @@ import platform
 import random
 import socket
 import ssl
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,11 +20,13 @@ from websockets.asyncio.client import ClientConnection, connect
 
 from labguard_client.identity import DeviceIdentity
 from labguard_client.instance import IdentityProcessLock
+from labguard_client.telemetry import collect_system_telemetry
 
 
 class AgentClient:
     def __init__(self, server_url: str, identity: DeviceIdentity, *, agent_version: str = "0.1.0",
-                 heartbeat_interval: float = 10.0, timeout: float = 15.0, allow_insecure_dev: bool = False):
+                 heartbeat_interval: float = 10.0, telemetry_interval_seconds: float = 30.0,
+                 timeout: float = 15.0, allow_insecure_dev: bool = False):
         if not server_url.startswith(("https://", "http://")):
             raise ValueError("Server URL must use HTTPS (HTTP is only for local development)")
         if server_url.startswith("http://") and not allow_insecure_dev:
@@ -32,6 +35,9 @@ class AgentClient:
         self.identity = identity
         self.agent_version = agent_version
         self.heartbeat_interval = heartbeat_interval
+        if not 10 <= telemetry_interval_seconds <= 3600:
+            raise ValueError("Telemetry interval must be between 10 and 3600 seconds")
+        self.telemetry_interval_seconds = telemetry_interval_seconds
         self.timeout = timeout
         self.boot_id = str(uuid4())
         self.ssl_context = ssl.create_default_context()
@@ -96,6 +102,78 @@ class AgentClient:
             raise RuntimeError("Heartbeat was not acknowledged")
         return ack
 
+    async def _read_session_acks(self, ws: ClientConnection, pending: dict[str, asyncio.Future]):
+        while True:
+            message = json.loads(await ws.recv())
+            if message.get("type") != "server.ack":
+                continue
+            event_id = message.get("payload", {}).get("event_id")
+            future = pending.pop(event_id, None) if isinstance(event_id, str) else None
+            if future is not None and not future.done():
+                future.set_result(message.get("payload", {}))
+
+    async def _send_session_event(self, ws: ClientConnection, event_type: str, payload: dict,
+                                  pending: dict[str, asyncio.Future], send_lock: asyncio.Lock):
+        envelope = self._envelope(event_type, payload)
+        encoded = json.dumps(envelope, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 60 * 1024:
+            raise ValueError("Telemetry/event frame exceeds the safe 60 KiB client limit")
+        event_id = envelope["event_id"]
+        future = asyncio.get_running_loop().create_future()
+        pending[event_id] = future
+        try:
+            async with send_lock:
+                await ws.send(encoded)
+            return await asyncio.wait_for(future, timeout=self.timeout)
+        finally:
+            pending.pop(event_id, None)
+            if not future.done():
+                future.cancel()
+
+    async def _run_connected_session(self, ws: ClientConnection, stop: asyncio.Event):
+        logger = logging.getLogger("labguard_client")
+        pending: dict[str, asyncio.Future] = {}
+        send_lock = asyncio.Lock()
+
+        async def heartbeat_loop():
+            while not await self._wait_or_stop(stop, self.heartbeat_interval):
+                ack = await self._send_session_event(ws, "client.heartbeat", {"health": "ok"}, pending, send_lock)
+                if not ack.get("accepted"):
+                    raise RuntimeError("Heartbeat was not acknowledged")
+
+        async def telemetry_loop():
+            while not stop.is_set():
+                try:
+                    snapshot = await asyncio.to_thread(collect_system_telemetry)
+                    ack = await self._send_session_event(ws, "client.telemetry", snapshot, pending, send_lock)
+                    if not ack.get("accepted"):
+                        logger.warning("Telemetry was rejected by server (%s)", ack.get("reason", "unknown"))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # A collection or telemetry acknowledgement failure is isolated from heartbeats.
+                    logger.warning("Telemetry collection/transmission failed (%s)", type(exc).__name__)
+                if await self._wait_or_stop(stop, self.telemetry_interval_seconds):
+                    break
+
+        tasks = [asyncio.create_task(self._read_session_acks(ws, pending)),
+                 asyncio.create_task(heartbeat_loop()), asyncio.create_task(telemetry_loop()),
+                 asyncio.create_task(stop.wait())]
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if tasks[3] in done:
+                return
+            for task in done:
+                if task is tasks[0]:
+                    await task
+                    raise ConnectionError("Authenticated agent session ended")
+                await task
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _wait_or_stop(self, stop: asyncio.Event, delay: float) -> bool:
         try:
             await asyncio.wait_for(stop.wait(), timeout=max(0.0, delay))
@@ -132,11 +210,7 @@ class AgentClient:
                     async with ws:
                         logger.info("Authenticated server connection established")
                         attempt = 0
-                        while not stop.is_set():
-                            if await self._wait_or_stop(stop, self.heartbeat_interval):
-                                break
-                            if await self._operation_or_stop(self.heartbeat(ws), stop) is None:
-                                break
+                        await self._run_connected_session(ws, stop)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
