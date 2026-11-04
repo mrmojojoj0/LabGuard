@@ -19,7 +19,7 @@ from labguard_server.models import (AdminSession, Administrator, AuditEvent, Dev
                                     DeviceCredential, DevicePosition, DeviceStatus, DeviceStatusEvent, DeviceTicket,
                                     EnrollmentCode, Room, now_utc)
 from labguard_server.schemas import RoomLayout
-from labguard_server.security import create_admin_session, digest, hash_password, new_secret, verify_password
+from labguard_server.security import create_admin_session, digest, hash_password, verify_password
 
 
 def audit(db: Session, actor_id: UUID | None, action: str, target_type: str, target_id: str | None, metadata=None, actor_type="ADMIN"):
@@ -57,8 +57,12 @@ def authenticate(db: Session, username: str, password: str, settings: Settings):
     return admin, raw, csrf, session
 
 
+_ENROLLMENT_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
 def create_enrollment_code(db: Session, admin_id: UUID, settings: Settings):
-    raw = new_secret()
+    # Eight symbols from a 32-character alphabet provide 40 random bits; avoid lookalike characters.
+    raw = "".join(secrets.choice(_ENROLLMENT_CODE_ALPHABET) for _ in range(8))
     row = EnrollmentCode(code_hash=digest(raw), created_by=admin_id,
                          expires_at=now_utc() + timedelta(minutes=settings.enrollment_code_ttl_minutes))
     db.add(row)
@@ -185,7 +189,7 @@ def record_agent_event(db: Session, device_id: UUID, sequence: int, event_type: 
     return now
 
 
-def refresh_device_states(db: Session, delayed_after: float, offline_after: float):
+def refresh_device_states(db: Session, delayed_after: float, offline_after: float, on_change=None):
     now = now_utc()
     statuses = db.scalars(select(DeviceStatus)).all()
     changed = 0
@@ -209,6 +213,8 @@ def refresh_device_states(db: Session, delayed_after: float, offline_after: floa
             status_row.changed_at = now
             db.add(DeviceStatusEvent(device_id=status_row.device_id, previous_state=previous, new_state=desired,
                                      reason="heartbeat_timeout" if desired in {"DELAYED", "OFFLINE"} else "administrative_state", occurred_at=now))
+            if on_change is not None:
+                on_change(status_row.device_id, previous, desired, now)
             changed += 1
     if changed:
         db.commit()

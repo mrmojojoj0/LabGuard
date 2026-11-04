@@ -11,6 +11,7 @@ from sqlalchemy import text
 from labguard_server.api import router
 from labguard_server.config import Settings
 from labguard_server.db import make_session_factory
+from labguard_server.events import AdminEventHub
 from labguard_server.websocket import router as websocket_router, status_monitor
 
 
@@ -25,6 +26,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             connection.execute(text("SELECT 1"))
         application.state.engine = engine
         application.state.session_factory = factory
+        application.state.admin_events = AdminEventHub()
+        application.state.admin_events.bind(asyncio.get_running_loop())
         application.state.active_devices = {}
         monitor = asyncio.create_task(status_monitor(application))
         try:

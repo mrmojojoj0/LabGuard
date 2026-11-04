@@ -16,7 +16,7 @@ class EnrollmentCodeOut(BaseModel):
 
 
 class EnrollmentRequestIn(BaseModel):
-    enrollment_code: str = Field(min_length=20, max_length=128)
+    enrollment_code: str = Field(min_length=8, max_length=8, pattern=r"^[A-HJ-NP-Z2-9]{8}$")
     device_id: UUID
     public_key: str = Field(min_length=32, max_length=4096)
     hostname: str = Field(min_length=1, max_length=255)

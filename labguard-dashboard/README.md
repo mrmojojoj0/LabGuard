@@ -37,11 +37,11 @@ npm run preview
 ## Current integration
 
 - `POST /api/v1/auth/login`, `GET /auth/me`, `POST /auth/logout` with the server-managed HttpOnly cookie and CSRF token returned at login. CSRF token is kept only in tab-scoped `sessionStorage` so reloads in that tab retain mutation support; passwords and cookie secrets are never stored by JavaScript.
-- `GET /devices` and `GET /devices/{id}/status` for fleet list, profile, overview counts, and 20-second status polling.
+- `GET /devices` and `GET /devices/{id}/status` for fleet list, profile, overview counts, connection state, and event-driven status refresh.
 - `GET /rooms`, `POST /rooms`, `PATCH /rooms/{id}` for room list and authorized room dimension/name/description editing.
 - `GET /enrollment/requests`, approval/rejection endpoints, and `POST /enrollment-codes` for Lab Admin and above.
 - `GET /audit-events?limit=25` for audit activity.
 
-The API has no pagination/filter parameters for devices, no room-layout read endpoint, no device telemetry/interfaces/inventory endpoints, no status history endpoint, and no administrator event-stream WebSocket. The device WebSocket at `/api/v1/agent/session` only accepts one-use device tickets and agent protocol messages; the dashboard never connects to it. Software/process/network/USB/remote access pages and non-overview detail tabs are marked as planned/unavailable.
+The dashboard receives authenticated status and connection events from the separate administrator Server-Sent Events endpoint `/api/v1/admin/events`; the device WebSocket at `/api/v1/agent/session` remains restricted to device tickets. EventSource reconnects after a dropped stream. Room assignments can be read and saved through `/api/v1/rooms/{id}/layout`; the dashboard provides an editor for approved devices and grid positions.
 
-Room dimension changes are supported, but placements cannot be loaded or safely edited through the current API response. The room grid preview therefore shows dimensions only and does not invent placements.
+Software/process/network/USB/remote access pages and telemetry detail remain unavailable because those APIs are not implemented. See `docs/LabGuard_LAN_Deployment.md` for local, LAN and production preparation guidance.

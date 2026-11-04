@@ -11,7 +11,7 @@ export function DashboardPage() {
   const devices = useQuery({ queryKey: ['devices'], queryFn: devicesApi.list })
   const pending = useQuery({ queryKey: ['enrollment'], queryFn: enrollmentApi.pending })
   const audit = useQuery({ queryKey: ['audit'], queryFn: auditApi.list })
-  const statuses = useQuery({ queryKey: ['statuses', devices.data?.map(d => d.id)], queryFn: () => devicesApi.statuses(devices.data ?? []), enabled: !!devices.data, refetchInterval: 20_000 })
+  const statuses = useQuery({ queryKey: ['statuses', devices.data?.map(d => d.id)], queryFn: () => devicesApi.statuses(devices.data ?? []), enabled: !!devices.data, refetchInterval: false })
   const registered = devices.data?.filter(device => device.enrollment_state === 'APPROVED') ?? []
   const registeredStatuses = statuses.data?.filter(s => s && registered.some(device => device.id === s.device_id)) ?? []
   const states = registeredStatuses.map(s => s!.agent_state)
@@ -23,7 +23,7 @@ export function DashboardPage() {
     { label: 'Offline', value: counts.OFFLINE, icon: SignalZero, tone: 'slate', note: 'No recent heartbeat' },
     { label: 'Pending enrollment', value: pending.data?.length, icon: UserRoundCheck, tone: 'violet', note: 'Awaiting review' },
   ]
-  return <><PageHeader eyebrow="FLEET OVERVIEW" title="Good morning" description="Here’s what’s happening across your managed labs." action={<span className="synced"><span className="live-dot"/> Live data · refreshes every 20 sec</span>} />
+  return <><PageHeader eyebrow="FLEET OVERVIEW" title="Good morning" description="Here’s what’s happening across your managed labs." action={<span className="synced"><span className="live-dot"/> Live status events</span>} />
     {(devices.isError || pending.isError || audit.isError) && <QueryError error={devices.error ?? pending.error ?? audit.error} />}
     <div className="metric-grid">{cards.map(card => { const Icon = card.icon; const loading = card.label === 'Registered devices' ? devices.isLoading : card.label === 'Pending enrollment' ? pending.isLoading : statuses.isLoading; return <Panel className="metric-card" key={card.label}><div className={`metric-icon ${card.tone}`}><Icon size={19}/></div><p>{card.label}</p><strong>{loading ? '—' : card.value ?? 0}</strong><small>{card.note}</small></Panel> })}</div>
     <div className="content-grid"><Panel><PanelTitle aside={<Link className="text-link" to="/devices">View all <ArrowUpRight size={14}/></Link>}>Device activity</PanelTitle>

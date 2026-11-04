@@ -34,7 +34,15 @@ def _claim_ticket(websocket: WebSocket, token: str) -> UUID | None:
 
 def _record(device_id: UUID, sequence: int, event_type: str, websocket: WebSocket, agent_version: str | None = None):
     with websocket.app.state.session_factory() as db:
-        return record_agent_event(db, device_id, sequence, event_type, agent_version)
+        from labguard_server.models import DeviceStatus
+        previous = db.get(DeviceStatus, device_id)
+        previous_state = previous.agent_state if previous else None
+        received_at = record_agent_event(db, device_id, sequence, event_type, agent_version)
+        current = db.get(DeviceStatus, device_id)
+        if current is not None and current.agent_state != previous_state:
+            websocket.app.state.admin_events.publish({"type": "device.status", "device_id": str(device_id),
+                "agent_state": current.agent_state, "changed_at": current.changed_at.isoformat()})
+        return received_at
 
 
 def _parse(text: str) -> ClientEnvelope:
@@ -75,6 +83,7 @@ async def agent_session(websocket: WebSocket):
         except RuntimeError:
             pass
     active[device_id] = websocket
+    websocket.app.state.admin_events.publish({"type": "device.connection", "device_id": str(device_id), "connected": True})
     try:
         try:
             hello = await asyncio.wait_for(_receive(websocket), timeout=10)
@@ -129,6 +138,7 @@ async def agent_session(websocket: WebSocket):
     finally:
         if active.get(device_id) is websocket:
             active.pop(device_id, None)
+            websocket.app.state.admin_events.publish({"type": "device.connection", "device_id": str(device_id), "connected": False})
 
 
 async def status_monitor(application):
@@ -139,4 +149,7 @@ async def status_monitor(application):
         with application.state.session_factory() as db:  # type: Session
             db.expire_all()
             from labguard_server.services import refresh_device_states
-            refresh_device_states(db, settings.delayed_after_seconds, settings.offline_after_seconds)
+            def emit_change(device_id, previous, desired, changed_at):
+                application.state.admin_events.publish({"type": "device.status", "device_id": str(device_id),
+                    "previous_state": previous, "agent_state": desired, "changed_at": changed_at.isoformat()})
+            refresh_device_states(db, settings.delayed_after_seconds, settings.offline_after_seconds, emit_change)

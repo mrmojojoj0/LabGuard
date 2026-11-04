@@ -3,11 +3,12 @@ from time import monotonic
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from labguard_server.db import get_db
-from labguard_server.models import AuditEvent, Device, DeviceAuthChallenge, DeviceCredential, DevicePosition, DeviceStatus, Room, now_utc
+from labguard_server.models import AuditEvent, Device, DeviceAuthChallenge, DeviceCredential, DevicePosition, DeviceStatus, DeviceStatusEvent, Room, now_utc
 from labguard_server.schemas import (DeviceApproval, DeviceChallengeRequest, DeviceOut, DeviceTicketRequest, EnrollmentCodeOut, EnrollmentRequestIn,
                                      LayoutOut, LoginRequest, RoomCreate, RoomLayout, RoomOut, RoomPatch)
 from labguard_server.security import csrf_protected, digest, require_role
@@ -104,19 +105,46 @@ def reject_enrollment(device_id: UUID, admin=Depends(require_role("LAB_ADMIN", c
 
 
 @router.post("/devices/{device_id}/credential/revoke")
-def revoke_device_credential(device_id: UUID, admin=Depends(require_role("SUPER_ADMIN", csrf=True)), db: Session = Depends(get_db)):
+async def revoke_device_credential(device_id: UUID, request: Request, admin=Depends(require_role("SUPER_ADMIN", csrf=True)), db: Session = Depends(get_db)):
     credential = db.scalar(select(DeviceCredential).where(DeviceCredential.device_id == device_id))
     if credential is None:
         raise HTTPException(status_code=404, detail={"code": "credential_not_found", "message": "Device credential not found"})
     if credential.revoked_at is None:
         credential.revoked_at = now_utc()
+        status_row = db.get(DeviceStatus, device_id)
+        if status_row is not None and status_row.agent_state != "QUARANTINED":
+            previous = status_row.agent_state
+            status_row.agent_state = "QUARANTINED"
+            status_row.changed_at = now_utc()
+            db.add(DeviceStatusEvent(device_id=device_id, previous_state=previous, new_state="QUARANTINED",
+                                     reason="credential_revoked", occurred_at=status_row.changed_at))
         audit(db, admin.id, "device.credential_revoke", "device", str(device_id), {"fingerprint": credential.fingerprint})
         db.commit()
+        request.app.state.admin_events.publish({"type": "device.status", "device_id": str(device_id),
+            "agent_state": "QUARANTINED", "changed_at": status_row.changed_at.isoformat() if status_row else now_utc().isoformat()})
+        active = request.app.state.active_devices.get(device_id)
+        if active is not None:
+            await active.close(code=4401, reason="credential_revoked")
     return {"device_id": str(device_id), "revoked": True}
 
 
+@router.get("/admin/events")
+async def administrator_events(request: Request, _admin=Depends(require_role("VIEWER"))):
+    hub = request.app.state.admin_events
+
+    async def stream():
+        async for event in hub.subscribe():
+            if event is None:
+                yield ": keep-alive\n\n"
+                continue
+            yield f"event: {event['type']}\ndata: {json.dumps(event, separators=(',', ':'))}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
+
+
 @router.get("/devices/{device_id}/status")
-def device_status(device_id: UUID, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+def device_status(device_id: UUID, request: Request, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
     status_row = db.get(DeviceStatus, device_id)
     device = db.get(Device, device_id)
     if status_row is None or device is None:
@@ -124,7 +152,19 @@ def device_status(device_id: UUID, _admin=Depends(require_role("VIEWER")), db: S
     return {"device_id": str(device_id), "agent_state": status_row.agent_state, "network_state": status_row.network_state,
             "last_heartbeat_at": status_row.last_heartbeat_at.isoformat() if status_row.last_heartbeat_at else None,
             "last_seen_at": device.last_seen_at.isoformat() if device.last_seen_at else None,
-            "changed_at": status_row.changed_at.isoformat()}
+            "changed_at": status_row.changed_at.isoformat(),
+            "connected": device_id in request.app.state.active_devices}
+
+
+@router.get("/rooms/{room_id}/layout", response_model=LayoutOut)
+def get_room_layout(room_id: UUID, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    room = db.get(Room, room_id)
+    if room is None or room.archived_at is not None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Room not found"})
+    positions = db.scalars(select(DevicePosition).where(DevicePosition.room_id == room.id)
+                           .order_by(DevicePosition.row_index, DevicePosition.column_index)).all()
+    return LayoutOut(room=room, assignments=[{"device_id": p.device_id, "row": p.row_index, "column": p.column_index}
+                                             for p in positions])
 
 
 @router.post("/agent/challenge")

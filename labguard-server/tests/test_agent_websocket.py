@@ -2,6 +2,7 @@ import asyncio
 import socket
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from uuid import UUID
 
@@ -88,7 +89,24 @@ def test_two_real_client_instances_heartbeat_disconnect_and_reconnect(client):
             assert db.get(DeviceStatus, UUID(identity_two.device_id)).agent_state == "ONLINE"
             transitions = db.scalars(select(DeviceStatusEvent).where(DeviceStatusEvent.device_id == UUID(identity_two.device_id))).all()
             assert {row.new_state for row in transitions} >= {"ONLINE", "OFFLINE"}
-        await ws_two_again.close()
+
+        csrf = login(client)
+        session_cookie = client.cookies.get("labguard_session")
+        def revoke_on_running_server():
+            request = urllib.request.Request(f"{base_url}/api/v1/devices/{identity_two.device_id}/credential/revoke",
+                data=b"", headers={"Cookie": f"labguard_session={session_cookie}", "X-CSRF-Token": csrf}, method="POST")
+            with urllib.request.urlopen(request, timeout=3) as response:
+                return response.status, response.read()
+        revoke_status, revoke_body = await asyncio.to_thread(revoke_on_running_server)
+        assert revoke_status == 200 and b'"revoked":true' in revoke_body
+        from websockets.exceptions import ConnectionClosed
+        with pytest.raises(ConnectionClosed):
+            await asyncio.wait_for(ws_two_again.recv(), 2)
+        assert ws_two_again.close_code == 4401
+        with server_app.state.session_factory() as db:
+            assert db.get(DeviceStatus, UUID(identity_two.device_id)).agent_state == "QUARANTINED"
+        with pytest.raises(RuntimeError, match=r"Server rejected request \(401\)"):
+            await asyncio.to_thread(agent_two._ticket)
         await ws_one.close()
 
     try:

@@ -1,4 +1,5 @@
-import { useState, type ComponentType, type ReactNode } from 'react'
+import { useEffect, useState, type ComponentType, type ReactNode } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Navigate, Route, Routes, useLocation, Link } from 'react-router-dom'
 import { Activity, ChevronDown, Command, Cpu, FileClock, Gauge, Grid2X2, Headphones, Laptop, Menu, Network, Package, Settings, Usb, UserRoundCheck, X } from 'lucide-react'
 import { LoginPage, useAuth } from '../features/auth/AuthProvider'
@@ -25,5 +26,22 @@ function Shell({ children }: { children: ReactNode }) {
   return <div className="app-shell"><aside className={`sidebar ${open ? 'sidebar-open' : ''}`}><div className="sidebar-brand"><span className="brand-mark">L</span><div><strong>LabGuard</strong><small>ADMIN CONSOLE</small></div><button className="mobile-close" onClick={() => setOpen(false)}><X size={18}/></button></div><div className="workspace-select"><span className="workspace-icon"><Command size={16}/></span><span><strong>Lab Network</strong><small>Institution workspace</small></span><ChevronDown size={14}/></div><nav>{groups.map(group => <div className="nav-group" key={group.title}><p>{group.title}</p>{group.items.map(item => { const Icon = item.icon; const active = item.path === '/' ? location.pathname === '/' : location.pathname === item.path || (item.path === '/devices' && location.pathname.startsWith('/devices/')); return <Link onClick={() => setOpen(false)} className={`nav-link ${active ? 'active' : ''}`} to={item.path} key={item.path}><Icon size={17}/><span>{item.label}</span>{['/software','/deployment','/processes','/network','/usb','/remote-access'].includes(item.path) && <i className="nav-soon"/>}</Link> })}</div>)}</nav><div className="sidebar-footer"><span className="sidebar-avatar">{admin?.username?.slice(0,1).toUpperCase()}</span><span className="sidebar-user"><strong>{admin?.username}</strong><small>{admin?.role?.replaceAll('_',' ')}</small></span><button className="icon-button logout-mini" title="Sign out" onClick={() => void logout()}><X size={16}/></button></div></aside>
     {open && <button className="mobile-scrim" onClick={() => setOpen(false)} aria-label="Close navigation"/>}<main className="main-shell"><header className="topbar"><div className="topbar-left"><button className="menu-toggle" onClick={() => setOpen(true)}><Menu size={19}/></button><span className="breadcrumb-root">Workspace</span><span className="crumb-sep">/</span><span className="breadcrumb-current">{current.label}</span></div><div className="topbar-actions"><div className="topbar-divider"/><button className="account-button" onClick={() => void logout()} title="Sign out"><span className="sidebar-avatar">{admin?.username?.slice(0,1).toUpperCase()}</span><span>{admin?.username}</span><ChevronDown size={14}/></button></div></header><div className="main-content">{children}</div><footer>LabGuard Admin Console <span>·</span> Phase 1 foundation</footer></main></div>
 }
-function RoutedShell() { return <Shell><Routes><Route path="/" element={<DashboardPage/>}/><Route path="/devices" element={<DevicesPage/>}/><Route path="/devices/:id" element={<DeviceDetailPage/>}/><Route path="/rooms" element={<RoomsPage/>}/><Route path="/enrollment" element={<EnrollmentPage/>}/><Route path="/settings" element={<SettingsPage/>}/><Route path="/audit" element={<AuditPage/>}/><Route path="/software" element={<Placeholder title="Software Inventory"/>}/><Route path="/deployment" element={<Placeholder title="Software Deployment"/>}/><Route path="/processes" element={<Placeholder title="Process Monitoring"/>}/><Route path="/network" element={<Placeholder title="Network Monitoring"/>}/><Route path="/usb" element={<Placeholder title="USB Monitoring"/>}/><Route path="/remote-access" element={<Placeholder title="Remote Access"/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell> }
+function AdminEventBridge() {
+  const { admin } = useAuth()
+  const queryClient = useQueryClient()
+  useEffect(() => {
+    if (!admin) return
+    const base = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
+    const stream = new EventSource(`${base}/api/v1/admin/events`, { withCredentials: true })
+    const refresh = () => {
+      void queryClient.invalidateQueries({ queryKey: ['statuses'] })
+      void queryClient.invalidateQueries({ queryKey: ['devices'] })
+    }
+    stream.addEventListener('device.status', refresh)
+    stream.addEventListener('device.connection', refresh)
+    return () => stream.close()
+  }, [admin, queryClient])
+  return null
+}
+function RoutedShell() { return <><AdminEventBridge/><Shell><Routes><Route path="/" element={<DashboardPage/>}/><Route path="/devices" element={<DevicesPage/>}/><Route path="/devices/:id" element={<DeviceDetailPage/>}/><Route path="/rooms" element={<RoomsPage/>}/><Route path="/enrollment" element={<EnrollmentPage/>}/><Route path="/settings" element={<SettingsPage/>}/><Route path="/audit" element={<AuditPage/>}/><Route path="/software" element={<Placeholder title="Software Inventory"/>}/><Route path="/deployment" element={<Placeholder title="Software Deployment"/>}/><Route path="/processes" element={<Placeholder title="Process Monitoring"/>}/><Route path="/network" element={<Placeholder title="Network Monitoring"/>}/><Route path="/usb" element={<Placeholder title="USB Monitoring"/>}/><Route path="/remote-access" element={<Placeholder title="Remote Access"/>}/><Route path="*" element={<Navigate to="/" replace/>}/></Routes></Shell></> }
 export function App() { const { admin } = useAuth(); return <Routes><Route path="/login" element={admin ? <Navigate to="/" replace/> : <LoginPage/>}/><Route path="*" element={<Protected><RoutedShell/></Protected>}/></Routes> }

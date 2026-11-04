@@ -34,11 +34,7 @@ Create the first administrator interactively (password is prompted and hashed wi
 python -m labguard_server.cli create-admin --username lab-admin --role SUPER_ADMIN
 ~~~
 
-Start the server:
-
-~~~powershell
-uvicorn labguard_server.main:app --env-file .env --host 127.0.0.1 --port 8000
-~~~
+Start the server locally with `Start-LabGuard-Server.bat` from the repository root. It defaults to `127.0.0.1:8000`. Set `LABGUARD_HOST=0.0.0.0` and `LABGUARD_PORT=8000` in the launching shell for LAN testing. See `docs/LabGuard_LAN_Deployment.md` for client, dashboard, firewall and TLS setup.
 
 The API is versioned under /api/v1. Liveness and readiness are /api/v1/health/live and /api/v1/health/ready. Interactive API docs should be disabled or access-restricted at the production ingress; this initial foundation does not yet implement an authenticated OpenAPI UI policy.
 
@@ -54,10 +50,10 @@ Schema changes must be represented by Alembic revisions. Apply with alembic upgr
 python -m pytest
 ~~~
 
-The integration fixture uses SQLite and applies the Alembic migration. Production uses PostgreSQL. Run migration and deployment checks against a disposable PostgreSQL instance before release.
+The integration fixture uses SQLite and applies all Alembic migrations. Client tests are in `../labguard-client/tests`; use its test extra to run them. PostgreSQL verification is environment-specific; see `docs/LabGuard_LAN_Deployment.md` and use a disposable database before applying migrations to any shared environment.
 
 The WSS integration test launches a local Uvicorn server and two real AgentClient instances. For local plaintext HTTP only, the client requires the explicit `allow_insecure_dev=True` option or CLI `--insecure-dev` flag.
 
 ## MVP notes
 
-Administrator sessions are opaque, stored as hashes, expiring and revocable. Mutating browser requests require X-CSRF-Token. Roles are VIEWER, OPERATOR, LAB_ADMIN, SUPER_ADMIN. Enrollment requests consume one-use admin-created codes and stay pending until approval. Client public keys are recorded for the phase 1 registry; device credential issuance and authenticated WSS are a later milestone. Grid coordinates are zero-based, unique per room, and bounded by configured dimensions. Administrative changes are written to audit_events in the same transaction.
+Administrator sessions are opaque, stored as hashes, expiring and revocable. Mutating browser requests require X-CSRF-Token. Roles are VIEWER, OPERATOR, LAB_ADMIN, SUPER_ADMIN. Enrollment requests consume one-use admin-created codes and stay pending until approval. Approved Ed25519 credentials authenticate one-use WSS tickets; revocation closes active sessions and quarantines the device. Grid coordinates are zero-based, unique per room, bounded by configured dimensions, and readable/editable through the room layout API. Administrative changes are written to audit_events in the same transaction.

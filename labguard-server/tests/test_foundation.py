@@ -75,6 +75,8 @@ def test_grid_conflict_bounds_and_audit(client):
     placed = client.put(f"/api/v1/rooms/{room['id']}/layout", headers=h,
                         json={"rows": 2, "columns": 2, "assignments":[{"device_id": ids[0], "row": 0, "column": 0}]})
     assert placed.status_code == 200
+    layout = client.get(f"/api/v1/rooms/{room['id']}/layout")
+    assert layout.status_code == 200 and layout.json()["assignments"] == [{"device_id": ids[0], "row": 0, "column": 0}]
     audit = client.get("/api/v1/audit-events")
     assert audit.status_code == 200
     assert {"room.create", "room.layout_update", "device.approve"}.issubset({x["action"] for x in audit.json()})
