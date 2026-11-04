@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "labguard-client"
+version = "0.1.0"
+description = "LabGuard Windows endpoint agent"
+requires-python = ">=3.12"
+dependencies = [
+  "cryptography>=43,<47",
+  "websockets>=15,<16",
+]
+
+[project.optional-dependencies]
+windows = ["pywin32>=306; platform_system == 'Windows'"]
+test = ["pytest>=8,<9"]
+
+[project.scripts]
+labguard-agent = "labguard_client.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

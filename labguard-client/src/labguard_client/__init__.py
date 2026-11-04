@@ -1,0 +1,1 @@
+"""LabGuard Windows endpoint agent."""
