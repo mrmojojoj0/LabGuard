@@ -15,7 +15,7 @@ const EMPTY_ASSIGNMENTS: Layout['assignments'] = []
 type DeviceWithStatus = { device: Device; status: DeviceStatus | null }
 type DeviceCardProps = DeviceWithStatus & {
   editable: boolean
-  coordinate?: string
+
   onInspect: (device: Device) => void
 }
 
@@ -24,7 +24,7 @@ function LabStatus({ value }: { value: string }) {
   return <span className={`lab-status lab-status-${value.toLowerCase().replaceAll('_', '-')}`}><i />{label}</span>
 }
 
-function DeviceCard({ device, status, editable, coordinate, onInspect }: DeviceCardProps) {
+function DeviceCard({ device, status, editable, onInspect }: DeviceCardProps) {
   const canDrag = editable && device.enabled && device.enrollment_state === 'APPROVED'
   const drag = useDraggable({ id: `device:${device.id}`, disabled: !canDrag })
   const state = device.enrollment_state === 'PENDING' ? 'PENDING' : status?.agent_state ?? 'NEVER_CONNECTED'
@@ -35,7 +35,7 @@ function DeviceCard({ device, status, editable, coordinate, onInspect }: DeviceC
       <span className="lab-device-label"><strong title={displayName}>{displayName}</strong><small>{device.hostname}</small></span>
       <LabStatus value={state} />
     </button>
-    {coordinate && <span className="lab-device-coordinate">{coordinate}</span>}
+
     {canDrag && <button ref={drag.handleRef} type="button" className="lab-drag-handle" aria-label={`Drag ${displayName}`} title="Drag to move"><GripVertical size={17} /></button>}
   </article>
 }
@@ -47,13 +47,13 @@ function FloorCell({ row, column, device, status, editable, onInspect }: {
   return <div ref={droppable.ref} className={`lab-floor-cell ${droppable.isDropTarget ? 'is-drop-target' : ''} ${device ? 'has-device' : 'is-empty'}`}>
     <span className="lab-cell-coordinate">R{row + 1} · C{column + 1}</span>
     {device
-      ? <DeviceCard device={device} status={status} editable={editable} coordinate={`R${row + 1} · C${column + 1}`} onInspect={onInspect} />
+      ? <DeviceCard device={device} status={status} editable={editable} onInspect={onInspect} />
       : <div className="lab-empty-cell"><Plus size={17} /><span>{editable ? 'Drop computer here' : 'Empty workstation'}</span></div>}
   </div>
 }
 
-function UnassignedRail({ devices, statusById, editable, onInspect }: {
-  devices: DeviceWithStatus[]; statusById: Map<string, DeviceStatus | null>; editable: boolean; onInspect: (device: Device) => void
+function UnassignedRail({ devices, editable, onInspect }: {
+  devices: DeviceWithStatus[]; editable: boolean; onInspect: (device: Device) => void
 }) {
   const drop = useDroppable({ id: 'unassigned', disabled: !editable })
   return <aside ref={drop.ref} className={`lab-unassigned-rail ${drop.isDropTarget ? 'is-drop-target' : ''}`}>
@@ -95,6 +95,21 @@ function assignmentsEqual(a: Layout['assignments'], b: Layout['assignments']) {
   return JSON.stringify(normalize(a)) === JSON.stringify(normalize(b))
 }
 
+function isValidLayout(layout: Layout) {
+  const { grid_rows: rows, grid_columns: columns } = layout.room
+  if (!Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || rows > 100 || columns < 1 || columns > 100) return false
+  if (layout.assignments.length > 1000) return false
+  const devices = new Set<string>()
+  const cells = new Set<string>()
+  for (const assignment of layout.assignments) {
+    const cell = `${assignment.row}:${assignment.column}`
+    if (!Number.isInteger(assignment.row) || !Number.isInteger(assignment.column) || assignment.row < 0 || assignment.column < 0 || assignment.row >= rows || assignment.column >= columns) return false
+    if (devices.has(assignment.device_id) || cells.has(cell)) return false
+    devices.add(assignment.device_id); cells.add(cell)
+  }
+  return true
+}
+
 export function RoomsPage() {
   const { admin } = useAuth()
   const toast = useToast()
@@ -132,7 +147,7 @@ export function RoomsPage() {
     onSuccess: async saved => {
       await qc.invalidateQueries({ queryKey: ['rooms'] })
       setEditingRoom(null); setCreatingRoom(false)
-      if (!selectedRoomId) { setSelectedRoomId(saved.id); setLoadedRoomId('') }
+      if (creatingRoom || !selectedRoomId) { setSelectedRoomId(saved.id); setLoadedRoomId(''); setDraft(null) }
       toast('Room saved.')
     },
     onError: (error: Error) => toast(error.message, 'error'),
@@ -154,6 +169,7 @@ export function RoomsPage() {
   })
 
   const savedLayout = layout.data
+  const layoutIsValid = !!draft && isValidLayout(draft)
   const isDirty = !!draft && !!savedLayout && (
     draft.room.grid_rows !== savedLayout.room.grid_rows || draft.room.grid_columns !== savedLayout.room.grid_columns ||
     !assignmentsEqual(draft.assignments, savedLayout.assignments)
@@ -186,7 +202,9 @@ export function RoomsPage() {
   }
   const handleDrop = (event: Parameters<NonNullable<React.ComponentProps<typeof DragDropProvider>['onDragEnd']>>[0]) => {
     if (!draft || !editable || event.canceled || !event.operation.target) return
-    const source = String(event.operation.source.id)
+    const sourceId = event.operation.source?.id
+    if (sourceId === undefined || sourceId === null) return
+    const source = String(sourceId)
     if (!source.startsWith('device:')) return
     const deviceId = source.slice('device:'.length)
     const targetId = String(event.operation.target.id)
@@ -261,10 +279,11 @@ export function RoomsPage() {
               </div>
               <div className="lab-floor-legend"><span><i className="legend-dot online" />Online</span><span><i className="legend-dot delayed" />Delayed</span><span><i className="legend-dot offline" />Offline</span><span><i className="legend-dot quarantined" />Quarantined</span><span><i className="legend-dot pending" />Pending</span></div>
             </Panel>
-            {editable && isDirty && <div className="lab-save-bar"><span><strong>Unsaved floor plan changes</strong><small>Changes stay local until you save.</small></span><div><Button disabled={saveLayout.isPending} onClick={() => { setDraft(structuredClone(savedLayout)); setNotice('Unsaved changes discarded.') }}>Discard</Button><Button className="primary" disabled={saveLayout.isPending} onClick={() => saveLayout.mutate(draft)}><Save size={15} />{saveLayout.isPending ? 'Saving…' : 'Save floor plan'}</Button></div></div>}
+            {editable && isDirty && <div className="lab-save-bar"><span><strong>Unsaved floor plan changes</strong><small>Changes stay local until you save.</small></span><div><Button disabled={saveLayout.isPending} onClick={() => { setDraft(structuredClone(savedLayout)); setNotice('Unsaved changes discarded.') }}>Discard</Button><Button className="primary" disabled={saveLayout.isPending || !layoutIsValid} onClick={() => saveLayout.mutate(draft)}><Save size={15} />{saveLayout.isPending ? 'Saving…' : 'Save floor plan'}</Button></div></div>}
+            {editable && draft && !layoutIsValid && <div className="lab-validation-error" role="alert">Grid dimensions must be whole numbers from 1 to 100. Each device and cell can only be assigned once, and placements must fit inside the grid.</div>}
             {saveLayout.isError && <div className="lab-save-error" role="alert">{saveLayout.error.message} Your edits are preserved. Adjust the layout and try again.</div>}
           </div>
-          <UnassignedRail devices={unassigned.map(item => ({ device: item, status: statusById.get(item.id) ?? null }))} statusById={statusById} editable={editable} onInspect={setSelectedDevice} />
+          <UnassignedRail devices={unassigned} editable={editable} onInspect={setSelectedDevice} />
         </div>
         {pending.length > 0 && <div className="lab-pending-note"><LabStatus value="PENDING" /><span>{pending.length} device{pending.length === 1 ? '' : 's'} awaiting enrollment approval cannot be placed yet.</span></div>}
         {selectedDevice && <DeviceInspector item={selectedDevice} status={inspectorStatus} coordinate={inspectorAssignment ? `Row ${inspectorAssignment.row + 1}, column ${inspectorAssignment.column + 1}` : undefined} onClose={() => setSelectedDevice(null)} />}

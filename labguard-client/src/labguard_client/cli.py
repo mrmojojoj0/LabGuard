@@ -1,11 +1,15 @@
 import argparse
 import asyncio
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 from getpass import getpass
+import sys
 
 from labguard_client.agent import AgentClient
 from labguard_client.identity import DeviceIdentity
+from labguard_client.instance import InstanceAlreadyRunning
 
 
 def main():
@@ -20,8 +24,31 @@ def main():
     run.add_argument("--state-dir", default=os.getenv("PROGRAMDATA", str(Path.home())) + "/LabGuard")
     run.add_argument("--insecure-dev", action="store_true", help="Allow plaintext HTTP for local development only")
     enroll.add_argument("--insecure-dev", action="store_true", help="Allow plaintext HTTP for local development only")
+    service = sub.add_parser("service", help="Prepare or manage the Windows Service")
+    service.add_argument("action", choices=("prepare", "install", "uninstall", "start", "stop", "restart", "status"))
+    service.add_argument("--server")
+    service.add_argument("--state-dir", default=os.getenv("PROGRAMDATA", str(Path.home())) + "/LabGuard")
     args = parser.parse_args()
-    identity = DeviceIdentity.load_or_create(Path(args.state_dir))
+    state_dir = Path(args.state_dir)
+    if args.command == "service":
+        state_dir.mkdir(parents=True, exist_ok=True)
+        _configure_logging(state_dir)
+        if args.action == "prepare":
+            if not args.server:
+                parser.error("service prepare requires --server https://...")
+            from labguard_client.windows_service import prepare_service
+            print(f"Prepared service configuration: {prepare_service(args.server, state_dir)}")
+        else:
+            from labguard_client.windows_service import service_command
+            print(service_command(args.action))
+        return
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    _configure_logging(state_dir)
+    if args.command == "run":
+        identity = DeviceIdentity.load_existing(state_dir)
+    else:
+        identity = DeviceIdentity.load_or_create(state_dir)
     client = AgentClient(args.server, identity, allow_insecure_dev=args.insecure_dev)
     if args.command == "enroll":
         result = client.enroll(args.code or getpass("One-time enrollment code: "))
@@ -31,6 +58,19 @@ def main():
             asyncio.run(client.run_forever())
         except KeyboardInterrupt:
             pass
+        except InstanceAlreadyRunning as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(2) from exc
+
+
+def _configure_logging(state_dir: Path) -> None:
+    logger = logging.getLogger("labguard_client")
+    if logger.handlers:
+        return
+    logger.setLevel(logging.INFO)
+    handler = RotatingFileHandler(state_dir / "labguard-agent.log", maxBytes=2_000_000, backupCount=4, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
 
 
 if __name__ == "__main__":

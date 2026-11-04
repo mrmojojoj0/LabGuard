@@ -18,6 +18,7 @@ from uuid import uuid4
 from websockets.asyncio.client import ClientConnection, connect
 
 from labguard_client.identity import DeviceIdentity
+from labguard_client.instance import IdentityProcessLock
 
 
 class AgentClient:
@@ -95,23 +96,62 @@ class AgentClient:
             raise RuntimeError("Heartbeat was not acknowledged")
         return ack
 
+    async def _wait_or_stop(self, stop: asyncio.Event, delay: float) -> bool:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=max(0.0, delay))
+            return True
+        except TimeoutError:
+            return stop.is_set()
+
+    async def _operation_or_stop(self, operation, stop: asyncio.Event):
+        task = asyncio.create_task(operation)
+        stopped = asyncio.create_task(stop.wait())
+        done, _ = await asyncio.wait((task, stopped), return_when=asyncio.FIRST_COMPLETED)
+        if stopped in done:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return None
+        stopped.cancel()
+        await asyncio.gather(stopped, return_exceptions=True)
+        return await task
+
     async def run_forever(self, stop: asyncio.Event | None = None):
         stop = stop or asyncio.Event()
+        process_lock = IdentityProcessLock.for_state_file(self.identity.state_file)
+        if process_lock:
+            process_lock.acquire()
+        logger = logging.getLogger("labguard_client")
+        logger.info("Agent starting")
         attempt = 0
-        while not stop.is_set():
-            try:
-                async with await self.connect_once() as ws:
-                    attempt = 0
-                    while not stop.is_set():
-                        await asyncio.sleep(self.heartbeat_interval)
-                        await self.heartbeat(ws)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if stop.is_set():
-                    break
-                logging.getLogger("labguard_client").warning("Agent connection failed; reconnecting (%s)", type(exc).__name__)
-                cap = min(60.0, 1.0 * (2 ** min(attempt, 6)))
-                await asyncio.sleep(random.uniform(0.0, cap))
-                attempt += 1
+        try:
+            while not stop.is_set():
+                try:
+                    ws = await self._operation_or_stop(self.connect_once(), stop)
+                    if ws is None:
+                        break
+                    async with ws:
+                        logger.info("Authenticated server connection established")
+                        attempt = 0
+                        while not stop.is_set():
+                            if await self._wait_or_stop(stop, self.heartbeat_interval):
+                                break
+                            if await self._operation_or_stop(self.heartbeat(ws), stop) is None:
+                                break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if stop.is_set():
+                        break
+                    category = "Authentication/connection failure" if isinstance(exc, RuntimeError) else "Unexpected agent exception"
+                    logger.warning("%s (%s); reconnecting", category, type(exc).__name__)
+                    cap = min(60.0, 1.0 * (2 ** min(attempt, 6)))
+                    delay = random.uniform(0.0, cap)
+                    logger.info("Reconnect attempt %d scheduled in %.1f seconds", attempt + 1, delay)
+                    attempt += 1
+                    if await self._wait_or_stop(stop, delay):
+                        break
+        finally:
+            if process_lock:
+                process_lock.release()
+            logger.info("Agent stopped")
 
