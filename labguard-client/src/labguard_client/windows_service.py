@@ -140,7 +140,16 @@ if os.name == "nt":
                 if self._stop_requested.is_set():
                     self._async_stop.set()
                 self.ReportServiceStatus(win32service.SERVICE_RUNNING)
-                logger.info("Windows service started")
+                from labguard_client.software_management import (
+                    is_administrator, running_as_local_system, running_in_service_session,
+                )
+                try:
+                    import win32api
+                    account = win32api.GetUserName()
+                except (ImportError, OSError):
+                    account = "unavailable"
+                logger.info("Windows service started account=%s local_system=%s elevated=%s session_0=%s",
+                            account, running_as_local_system(), is_administrator(), running_in_service_session())
                 client = AgentClient(config.server_url, identity, timeout=config.timeout,
                                      telemetry_interval_seconds=config.telemetry_interval_seconds,
                                      software_inventory_interval_seconds=config.software_inventory_interval_seconds)

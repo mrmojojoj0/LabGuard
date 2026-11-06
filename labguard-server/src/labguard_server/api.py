@@ -1,6 +1,7 @@
 from uuid import UUID, uuid4
 from time import monotonic
 import json
+import getpass
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -12,7 +13,7 @@ from labguard_server.models import (AuditEvent, Device, DeviceAuthChallenge, Dev
                                     DeviceStatus, DeviceStatusEvent, Room, SoftwareCatalogPackage, SoftwareJob, now_utc)
 from labguard_server.schemas import (DeviceApproval, DeviceChallengeRequest, DeviceOut, DeviceTicketRequest, EnrollmentCodeOut, EnrollmentRequestIn,
                                      LayoutOut, LoginRequest, RoomCreate, RoomLayout, RoomOut, RoomPatch,
-                                     SoftwareCatalogPackageCreate, SoftwareJobCreate)
+                                     SoftwareCatalogPackageCreate, SoftwareJobCreate, WingetCatalogImport)
 from labguard_server.security import csrf_protected, digest, require_role
 from labguard_server.services import (approve_device, audit, authenticate, create_enrollment_code, create_room,
                                       create_device_challenge, delete_device, issue_device_ticket, save_layout, submit_enrollment,
@@ -23,6 +24,8 @@ from labguard_server.software_inventory import (device_software_items, global_so
 from labguard_server.websocket import request_software_inventory_refresh
 from labguard_server.software_jobs import (catalog_out, create_software_job, dispatch_software_job,
                                            job_out)
+from labguard_server.winget_discovery import (WingetDiscoveryError, get_winget_package_metadata,
+                                              get_winget_version, list_winget_sources, search_winget_packages)
 
 router = APIRouter(prefix="/api/v1")
 _login_failures: dict[str, list[float]] = {}
@@ -297,6 +300,77 @@ def list_software_catalog(search: str | None = Query(default=None, max_length=12
     elif approved is not None:
         query = query.where(SoftwareCatalogPackage.approved.is_(approved))
     return [catalog_out(row) for row in db.scalars(query.order_by(SoftwareCatalogPackage.display_name)).all()]
+
+
+@router.get("/software/discovery/status")
+def winget_discovery_status(_admin=Depends(require_role("SUPER_ADMIN"))):
+    try:
+        return {"available": True, "version": get_winget_version(), "execution_identity": getpass.getuser(), "error": None}
+    except WingetDiscoveryError as exc:
+        return {"available": False, "version": None, "execution_identity": getpass.getuser(),
+                "error": {"code": exc.code, "message": exc.message}}
+
+
+@router.get("/software/discovery/sources")
+def list_winget_repository_sources(_admin=Depends(require_role("SUPER_ADMIN"))):
+    try:
+        version, sources = list_winget_sources()
+    except WingetDiscoveryError as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.code, "message": exc.message}) from exc
+    return {"winget_version": version, "sources": [source.as_dict() for source in sources]}
+
+
+@router.get("/software/discovery/search")
+def search_winget_repository(query: str = Query(min_length=1, max_length=128),
+                             source: str = Query(default="winget", min_length=1, max_length=64,
+                                                 pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"),
+                             _admin=Depends(require_role("SUPER_ADMIN")), db: Session = Depends(get_db)):
+    try:
+        version, packages = search_winget_packages(query, source)
+    except WingetDiscoveryError as exc:
+        raise HTTPException(status_code=503, detail={"code": exc.code, "message": exc.message}) from exc
+    results = []
+    for package in packages:
+        existing = db.scalar(select(SoftwareCatalogPackage).where(
+            SoftwareCatalogPackage.package_manager == "WINGET",
+            func.lower(SoftwareCatalogPackage.package_id) == package.package_id.lower()))
+        results.append({**package.as_dict(), "catalog_status": existing.approval_status if existing else None})
+    return {"source": source, "winget_version": version, "results": results}
+
+
+@router.post("/software/discovery/import", status_code=201)
+def import_winget_discovery(body: WingetCatalogImport, request: Request,
+                            admin=Depends(require_role("SUPER_ADMIN", csrf=True)),
+                            db: Session = Depends(get_db)):
+    # Existing client jobs deliberately accept only the v0.6 community source.
+    # Keep discovery from creating approved entries that the agent cannot execute faithfully.
+    if body.source.casefold() != "winget":
+        raise HTTPException(status_code=422, detail={"code": "winget_source_not_deployable",
+                           "message": "Only packages from the configured winget source can be added to the deployable catalog"})
+    existing = db.scalar(select(SoftwareCatalogPackage).where(
+        SoftwareCatalogPackage.package_manager == "WINGET",
+        func.lower(SoftwareCatalogPackage.package_id) == body.package_id.lower()))
+    if existing is not None:
+        return {"package": catalog_out(existing), "created": False}
+    try:
+        metadata = get_winget_package_metadata(body.package_id, body.source)
+    except WingetDiscoveryError as exc:
+        status = 422 if exc.code.startswith("invalid_") else 503
+        raise HTTPException(status_code=status, detail={"code": exc.code, "message": exc.message}) from exc
+    package = SoftwareCatalogPackage(
+        display_name=metadata["display_name"], package_id=body.package_id,
+        package_manager="WINGET", publisher=metadata["publisher"], description=metadata["description"],
+        version_policy="LATEST", approved_version=None, supported_scopes=body.supported_scopes,
+        source="WINGET_COMMUNITY", approved=False, approval_status="PENDING", created_by=admin.id,
+    )
+    db.add(package)
+    db.flush()
+    audit(db, admin.id, "software.catalog.discover", "software_package", str(package.id),
+          {"package_id": package.package_id, "source": body.source})
+    db.commit()
+    db.refresh(package)
+    request.app.state.admin_events.publish({"type": "software.catalog", "package_id": str(package.id)})
+    return {"package": catalog_out(package), "created": True}
 
 
 @router.post("/software/catalog", status_code=201)

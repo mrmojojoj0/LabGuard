@@ -270,6 +270,19 @@ class SoftwareCatalogPackageCreate(BaseModel):
         return self
 
 
+class WingetCatalogImport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    package_id: StrictStr = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
+    source: StrictStr = Field(default="winget", min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    supported_scopes: list[Literal["MACHINE", "USER"]] = Field(default_factory=lambda: ["MACHINE"], min_length=1, max_length=2)
+
+    @model_validator(mode="after")
+    def unique_scopes(self):
+        if len(self.supported_scopes) != len(set(self.supported_scopes)):
+            raise ValueError("supported scopes must be unique")
+        return self
+
+
 class SoftwareJobCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     action: Literal["INSTALL", "UNINSTALL"]

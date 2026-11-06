@@ -176,6 +176,19 @@ export interface SoftwareCatalogPackage {
   created_at: string;
   approved_at: string | null;
 }
+export interface WingetDiscoveryStatus {
+  available: boolean;
+  version: string | null;
+  execution_identity: string;
+  error: { code: string; message: string } | null;
+}
+export interface WingetDiscoveryResult {
+  name: string;
+  package_id: string;
+  version: string | null;
+  source: string;
+  catalog_status: SoftwareCatalogPackage["approval_status"] | null;
+}
 export interface SoftwareJob {
   id: string;
   device_id: string;

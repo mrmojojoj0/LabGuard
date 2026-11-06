@@ -19,11 +19,35 @@ export function SoftwareManagementControls({ id, items }: { id: string; items: S
   const toast = useToast();
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
+  const [repositorySearch, setRepositorySearch] = useState("");
+  const [repositorySource, setRepositorySource] = useState("winget");
+  const [importedPackages, setImportedPackages] = useState<Record<string, string>>({});
   const [manager, setManager] = useState<"ALL" | "WINGET" | "CHOCO">("ALL");
   const [selection, setSelection] = useState<Selection | null>(null);
   const [scope, setScope] = useState<"MACHINE" | "USER">("MACHINE");
   const [version, setVersion] = useState("");
   const catalog = useQuery({ queryKey: ["software-catalog", search, manager], queryFn: () => softwareApi.catalog({ search, approved: true, ...(manager === "ALL" ? {} : { package_manager: manager }) }) });
+  const canDiscover = admin?.role === "SUPER_ADMIN";
+  const wingetSources = useQuery({
+    queryKey: ["winget-discovery-sources"],
+    queryFn: softwareApi.wingetSources,
+    enabled: canDiscover,
+  });
+  const searchRepository = useMutation({
+    mutationFn: ({ query, source }: { query: string; source: string }) =>
+      softwareApi.searchWingetRepository(query, source),
+    onError: (error: Error) => toast("WinGet repository search failed. " + error.message, "error"),
+  });
+  const importDiscovered = useMutation({
+    mutationFn: ({ package_id, source }: { package_id: string; source: string }) =>
+      softwareApi.importWingetPackage({ package_id, source, supported_scopes: ["MACHINE"] }),
+    onSuccess: (result) => {
+      setImportedPackages((current) => ({ ...current, [result.package.package_id.toLowerCase()]: result.package.approval_status }));
+      void qc.invalidateQueries({ queryKey: ["software-catalog"] });
+      toast(result.created ? "WinGet package added for Super Admin approval. Review it in Software Deployment." : "This WinGet package is already in the catalog.");
+    },
+    onError: (error: Error) => toast("Package could not be imported. " + error.message, "error"),
+  });
   const jobs = useQuery({ queryKey: ["software-jobs", id], queryFn: () => softwareApi.jobs(id), refetchInterval: 3000 });
   const createJob = useMutation({
     mutationFn: (body: Parameters<typeof softwareApi.createJob>[1]) => softwareApi.createJob(id, body),
@@ -65,6 +89,40 @@ export function SoftwareManagementControls({ id, items }: { id: string; items: S
         <Search size={14} className="text-[var(--color-muted)]" />
         <input className="h-9 w-full bg-transparent text-[10px] text-[var(--color-foreground)] outline-none" placeholder="Search approved packages" value={search} onChange={(event) => setSearch(event.target.value)} />
       </label>
+      {canDiscover && <section className="mb-4 rounded-lg border border-[var(--color-border)] p-3" aria-label="WinGet repository discovery">
+        <h3 className="text-[11px] font-semibold text-[var(--color-foreground)]">Search WinGet Repository</h3>
+        <p className="mt-1 text-[9px] text-[var(--color-muted)]">This searches packages available from the server's WinGet source. Results are separate from the approved packages below.</p>
+        {wingetSources.isLoading && <Loading label="Loading WinGet sources…" />}
+        {wingetSources.isError && <QueryError error={wingetSources.error} />}
+        {wingetSources.data && <form className="mt-2 flex flex-wrap gap-2" onSubmit={(event) => {
+          event.preventDefault();
+          const sources = wingetSources.data?.sources ?? [];
+          const source = sources.some((item) => item.name === repositorySource) ? repositorySource : sources[0]?.name ?? "winget";
+          searchRepository.mutate({ query: repositorySearch.trim(), source });
+        }}>
+          <input className={selectClass} aria-label="WinGet repository search text" placeholder="Search available WinGet packages" value={repositorySearch} onChange={(event) => setRepositorySearch(event.target.value)} maxLength={128} required />
+          <select className={selectClass} aria-label="WinGet repository source" value={repositorySource} onChange={(event) => setRepositorySource(event.target.value)}>
+            {wingetSources.data.sources.map((source) => <option key={source.name} value={source.name}>{source.name}</option>)}
+          </select>
+          <Button disabled={!repositorySearch.trim() || searchRepository.isPending}>{searchRepository.isPending ? "Searching…" : "Search WinGet Repository"}</Button>
+        </form>}
+        {searchRepository.isPending && <Loading label="Searching the WinGet repository…" />}
+        {searchRepository.isError && <QueryError error={searchRepository.error} />}
+        {searchRepository.data && <div className="mt-3" aria-live="polite">
+          <p className="text-[9px] text-[var(--color-muted)]">{searchRepository.data.results.length} result(s) from {searchRepository.data.source} · WinGet {searchRepository.data.winget_version}</p>
+          {!searchRepository.data.results.length ? <p className="pt-2 text-[10px] text-[var(--color-muted)]">No available packages matched that search.</p> :
+            <div className="divide-y divide-[var(--color-border)]">{searchRepository.data.results.map((result) => {
+              const importedStatus = importedPackages[result.package_id.toLowerCase()];
+              const status = importedStatus ?? result.catalog_status;
+              return <div className="flex flex-wrap items-center justify-between gap-3 py-2" key={result.source + ":" + result.package_id}>
+                <div><strong className="block text-[10px] text-[var(--color-foreground)]">{result.name}</strong><span className="text-[9px] text-[var(--color-muted)]">{result.package_id} · {result.version ?? "Version unavailable"} · {result.source}</span></div>
+                {status ? <span className="text-[9px] text-[var(--color-muted)]">{importedStatus ? "Added for approval" : "In catalog"} · {status}</span> :
+                  result.source.toLowerCase() !== "winget" ? <span className="text-[9px] text-[var(--color-muted)]">Search only · client deployment currently uses the winget source</span> :
+                    <Button disabled={importDiscovered.isPending} onClick={() => importDiscovered.mutate({ package_id: result.package_id, source: result.source })}>Add for approval</Button>}
+              </div>;
+            })}</div>}
+        </div>}
+      </section>}
       <select className={selectClass} aria-label="Filter package manager" value={manager} onChange={(event) => setManager(event.target.value as typeof manager)}><option value="ALL">All package managers</option><option value="WINGET">WinGet</option><option value="CHOCO">Chocolatey</option></select>
       {catalog.isError && <QueryError error={catalog.error} />}
       {catalog.isLoading ? <Loading label="Loading approved catalog…" /> : !approved.length ?

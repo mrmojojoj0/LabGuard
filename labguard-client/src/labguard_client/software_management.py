@@ -101,14 +101,28 @@ def running_as_local_system() -> bool:
         return False
     try:
         import win32api
-        account = win32api.GetUserName().casefold()
-        return account in {"system", "nt authority\\system", "localsystem"}
-    except (ImportError, OSError):
+        import win32con
+        import win32security
+        token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+        current_sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+        system_sid = win32security.CreateWellKnownSid(win32security.WinLocalSystemSid, None)
+        return win32security.EqualSid(current_sid, system_sid)
+    except (ImportError, OSError, AttributeError):
         return False
 
 
 def is_administrator() -> bool:
     if os.name != "nt":
+        return False
+    try:
+        import win32api
+        import win32con
+        import win32security
+        token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+        elevation = win32security.GetTokenInformation(token, win32security.TokenElevation)
+        return bool(elevation)
+    except (ImportError, OSError, AttributeError):
+        # Fail closed when Windows cannot determine whether the current token is elevated.
         return False
 
 
@@ -124,10 +138,6 @@ def running_in_service_session() -> bool:
         return session_id.value == 0
     except (AttributeError, OSError):
         return True
-    try:
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except (AttributeError, OSError):
-        return False
 
 
 def _discover(name: str, known_paths: list[Path], which: Callable[[str], str | None]) -> str:
@@ -222,13 +232,16 @@ def execute_package_job(offer: SoftwareJobOffer, *, which: Callable[[str], str |
     service_context = running_in_service_session() if service_context is None else service_context
     if offer.installation_scope == "USER" and (local_system or service_context):
         raise UnsupportedExecutionContext("user_scope_unavailable_in_service_session")
-    if offer.installation_scope == "MACHINE" and not (local_system or administrator):
-        raise UnsupportedExecutionContext("machine_scope_requires_administrator")
+    if offer.installation_scope == "MACHINE":
+        if not service_context:
+            raise UnsupportedExecutionContext("privileged_service_unavailable")
+        if not local_system:
+            if not administrator:
+                raise UnsupportedExecutionContext("machine_scope_requires_administrator")
+            raise UnsupportedExecutionContext("privileged_service_unavailable")
     if offer.package_manager == "WINGET":
         env = os.environ if environ is None else environ
-        local = env.get("LOCALAPPDATA")
-        paths = [Path(local) / "Microsoft" / "WindowsApps" / "winget.exe"] if local else []
-        executable = _discover("winget", paths, which)
+        executable = discover_winget(which=which, environ=env)
     elif offer.package_manager == "CHOCO":
         env = os.environ if environ is None else environ
         paths = [Path(env.get("ProgramData", r"C:\ProgramData")) / "chocolatey" / "bin" / "choco.exe"]
@@ -240,8 +253,12 @@ def execute_package_job(offer: SoftwareJobOffer, *, which: Callable[[str], str |
         progress("Starting approved package manager")
     with tempfile.TemporaryFile() as output:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-        proc = popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                     shell=False, creationflags=flags)
+        try:
+            proc = popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                         shell=False, creationflags=flags)
+        except PermissionError as exc:
+            code = "machine_scope_permission_denied" if offer.installation_scope == "MACHINE" else "user_scope_permission_denied"
+            raise UnsupportedExecutionContext(code) from exc
         start = time.monotonic()
         last_progress = 0
         timed_out = False

@@ -1,5 +1,5 @@
 import { api, json } from "../../lib/api";
-import type { SoftwareAggregatePage, SoftwareCatalogPackage, SoftwareCollectionStatus, SoftwareJobsPage, SoftwarePageResult, SoftwareSummary, SoftwareJob } from "../../lib/types";
+import type { SoftwareAggregatePage, SoftwareCatalogPackage, SoftwareCollectionStatus, SoftwareJobsPage, SoftwarePageResult, SoftwareSummary, SoftwareJob, WingetDiscoveryResult, WingetDiscoveryStatus } from "../../lib/types";
 
 export interface SoftwareFilters {
   search?: string;
@@ -37,6 +37,14 @@ export const softwareApi = {
     ),
   catalog: (filters: { search?: string; package_manager?: string; approved?: boolean } = {}) =>
     api<SoftwareCatalogPackage[]>(`/software/catalog${query(filters)}`),
+  wingetDiscoveryStatus: () => api<WingetDiscoveryStatus>("/software/discovery/status"),
+  wingetSources: () => api<{ winget_version: string; sources: Array<{ name: string }> }>("/software/discovery/sources"),
+  searchWingetRepository: (search: string, source = "winget") =>
+    api<{ source: string; winget_version: string; results: WingetDiscoveryResult[] }>(
+      `/software/discovery/search?query=${encodeURIComponent(search)}&source=${encodeURIComponent(source)}`,
+    ),
+  importWingetPackage: (body: { package_id: string; source: string; supported_scopes: Array<"MACHINE" | "USER"> }) =>
+    api<{ package: SoftwareCatalogPackage; created: boolean }>("/software/discovery/import", json("POST", body)),
   createCatalogPackage: (body: {
     display_name: string; package_id: string; package_manager: "WINGET" | "CHOCO";
     publisher?: string; description?: string; version_policy: "LATEST" | "PINNED" | "SELECTABLE";

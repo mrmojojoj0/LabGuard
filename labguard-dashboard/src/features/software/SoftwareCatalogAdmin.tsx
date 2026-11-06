@@ -20,8 +20,12 @@ export function SoftwareCatalogAdmin() {
   const [version, setVersion] = useState("");
   const [scopes, setScopes] = useState<Array<"MACHINE" | "USER">>(["MACHINE"]);
   const [search, setSearch] = useState("");
+  const [repositorySearch, setRepositorySearch] = useState("");
+  const [repositorySource, setRepositorySource] = useState("winget");
   const [managerFilter, setManagerFilter] = useState<"ALL" | "WINGET" | "CHOCO">("ALL");
   const catalog = useQuery({ queryKey: ["software-catalog", "all", search, managerFilter], queryFn: () => softwareApi.catalog({ search, ...(managerFilter === "ALL" ? {} : { package_manager: managerFilter }) }) });
+  const wingetStatus = useQuery({ queryKey: ["winget-discovery-status"], queryFn: softwareApi.wingetDiscoveryStatus });
+  const wingetSources = useQuery({ queryKey: ["winget-discovery-sources"], queryFn: softwareApi.wingetSources });
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: ["software-catalog"] });
     void qc.invalidateQueries({ queryKey: ["software-jobs"] });
@@ -39,9 +43,40 @@ export function SoftwareCatalogAdmin() {
   const approve = useMutation({ mutationFn: softwareApi.approveCatalogPackage, onSuccess: () => { invalidate(); toast("Package approved."); }, onError: (error: Error) => toast(error.message, "error") });
   const revoke = useMutation({ mutationFn: softwareApi.revokeCatalogPackage, onSuccess: () => { invalidate(); toast("Package approval revoked."); }, onError: (error: Error) => toast(error.message, "error") });
   const reject = useMutation({ mutationFn: softwareApi.rejectCatalogPackage, onSuccess: () => { invalidate(); toast("Package rejected and kept out of the deployment catalog."); }, onError: (error: Error) => toast(error.message, "error") });
+  const discover = useMutation({ mutationFn: ({ query, source }: { query: string; source: string }) => softwareApi.searchWingetRepository(query, source), onError: (error: Error) => toast(`WinGet search failed. ${error.message}`, "error") });
+  const importDiscovered = useMutation({
+    mutationFn: ({ package_id, source }: { package_id: string; source: string }) =>
+      softwareApi.importWingetPackage({ package_id, source, supported_scopes: ["MACHINE"] }),
+    onSuccess: (result) => { invalidate(); toast(result.created ? "WinGet package added for approval." : "This WinGet package is already in the catalog."); },
+    onError: (error: Error) => toast(`Package could not be added. ${error.message}`, "error"),
+  });
   if (admin?.role !== "SUPER_ADMIN") return null;
   const toggleScope = (value: "MACHINE" | "USER") => setScopes((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
   return <>
+    <Panel className="mb-4">
+      <PanelTitle>Discover available WinGet packages</PanelTitle>
+      <p className="mt-1 text-[10px] text-[var(--color-muted)]">Search the WinGet source available to this server, then add selected packages as pending catalog entries. Client inventory remains locally collected.</p>
+      {wingetStatus.data && <p className="mt-2 text-[10px] text-[var(--color-muted)]" role="status">{wingetStatus.data.available ? `Server WinGet ${wingetStatus.data.version} is available to ${wingetStatus.data.execution_identity ?? "the server process"}.` : `Server WinGet unavailable: ${wingetStatus.data.error?.message ?? "Discovery cannot run in this server context."}`}</p>}
+      {wingetStatus.isError && <QueryError error={wingetStatus.error} />}
+      {wingetSources.data && <p className="mt-1 text-[9px] text-[var(--color-muted)]">Configured WinGet sources: {wingetSources.data.sources.map((item) => item.name).join(", ") || "none"}</p>}
+      {wingetSources.isError && <QueryError error={wingetSources.error} />}
+      <form className="mt-3 flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); discover.mutate({ query: repositorySearch.trim(), source: repositorySource }); }}>
+        <input className={inputClass} aria-label="Search WinGet repository" placeholder="Search available packages" value={repositorySearch} onChange={(event) => setRepositorySearch(event.target.value)} maxLength={128} required />
+        <select className={inputClass} aria-label="WinGet source" value={repositorySource} onChange={(event) => setRepositorySource(event.target.value)} disabled={!wingetSources.data?.sources.length}>{(wingetSources.data?.sources.length ? wingetSources.data.sources : [{ name: "winget" }]).map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}</select>
+        <Button disabled={!repositorySearch.trim() || discover.isPending || wingetStatus.data?.available === false}>{discover.isPending ? "Searching…" : "Search WinGet repository"}</Button>
+      </form>
+      {discover.isError && <QueryError error={discover.error} />}
+      {discover.data && <div className="mt-3">
+        <p className="text-[9px] text-[var(--color-muted)]">{discover.data.results.length} result(s) from {discover.data.source} · WinGet {discover.data.winget_version}</p>
+        {discover.data.results.length === 0 ? <p className="pt-2 text-[10px] text-[var(--color-muted)]">No available packages matched that search.</p> : <div className="divide-y divide-[var(--color-border)]">{discover.data.results.map((result) => {
+          const existing = catalog.data?.find((pkg) => pkg.package_manager === "WINGET" && pkg.package_id.toLowerCase() === result.package_id.toLowerCase());
+          return <div className="flex flex-wrap items-center justify-between gap-3 py-2" key={`${result.source}:${result.package_id}`}>
+            <div><strong className="block text-[10px] text-[var(--color-foreground)]">{result.name}</strong><span className="text-[9px] text-[var(--color-muted)]">{result.package_id} · {result.version ?? "Version unavailable"} · {result.source}</span></div>
+            {existing || result.catalog_status ? <span className="text-[9px] text-[var(--color-muted)]">In catalog · {existing?.approval_status ?? result.catalog_status}</span> : result.source.toLowerCase() !== "winget" ? <span className="text-[9px] text-[var(--color-muted)]">Search only · client deployment currently uses the winget source</span> : <Button disabled={importDiscovered.isPending} onClick={() => importDiscovered.mutate({ package_id: result.package_id, source: result.source })}>Add for approval</Button>}
+          </div>;
+        })}</div>}
+      </div>}
+    </Panel>
     <Panel className="mb-4">
       <PanelTitle>Software approval catalog</PanelTitle>
       <p className="mt-1 text-[10px] text-[var(--color-muted)]">Only reviewed package identifiers can be deployed. Adding a package does not approve it.</p>
