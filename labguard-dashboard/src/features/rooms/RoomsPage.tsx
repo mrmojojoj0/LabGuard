@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from 'react'
 import { DragDropProvider, useDraggable, useDroppable } from '@dnd-kit/react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, Check, ChevronDown, Computer, GripVertical, LayoutGrid, MarginTop, Monitor, Pencil, Plus, Presentation, Save, X } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, Computer, GripVertical, LayoutGrid, Monitor, Pencil, Plus, Presentation, Save, X } from 'lucide-react'
 import { roomsApi } from './api'
 import { devicesApi } from '../devices/api'
 import { Button, Empty, PageHeader, Panel, PanelTitle, QueryError, Skeleton } from '../../components/ui'
@@ -133,6 +133,18 @@ export function RoomsPage() {
   const layout = useQuery({ queryKey: ['room-layout', selectedRoomId], queryFn: () => roomsApi.layout(selectedRoomId), enabled: !!selectedRoomId })
   const selectedRoom = rooms.data?.find(room => room.id === selectedRoomId) ?? null
   const statusById = useMemo(() => new Map((statuses.data ?? []).filter((item): item is DeviceStatus => item !== null).map(item => [item.device_id, item])), [statuses.data])
+
+  useEffect(() => {
+    const onDeviceDeleted = (event: Event) => {
+      const id = (event as CustomEvent<{ deviceId: string }>).detail?.deviceId
+      if (!id) return
+      setSelectedDevice(current => current?.id === id ? null : current)
+      setDraft(current => current ? { ...current, assignments: current.assignments.filter(item => item.device_id !== id) } : current)
+      void qc.invalidateQueries({ queryKey: ['room-layout'] })
+    }
+    window.addEventListener('labguard:device-deleted', onDeviceDeleted)
+    return () => window.removeEventListener('labguard:device-deleted', onDeviceDeleted)
+  }, [qc])
 
   useEffect(() => {
     if (!selectedRoomId && rooms.data?.length) setSelectedRoomId(rooms.data[0].id)

@@ -11,6 +11,7 @@ import { EnrollmentPage } from '../features/enrollment/EnrollmentPage'
 import { SettingsPage } from '../features/settings/SettingsPage'
 import { AuditPage } from '../features/audit/AuditPage'
 import { ComingSoon } from '../components/ui'
+import type { Device } from '../lib/types'
 
 type Nav = { label: string; path: string; icon: ComponentType<{ size?: number }> }
 const groups: { title: string; items: Nav[] }[] = [
@@ -45,6 +46,21 @@ function AdminEventBridge() {
     stream.addEventListener('device.status', refresh)
     stream.addEventListener('device.connection', refresh)
     stream.addEventListener('device.telemetry', refreshTelemetry)
+    const deviceDeleted = (event: MessageEvent<string>) => {
+      const id = (JSON.parse(event.data) as { device_id: string }).device_id
+      queryClient.setQueryData<Device[]>(['devices'], current => current?.filter(device => device.id !== id))
+      queryClient.removeQueries({ queryKey: ['device-status', id] })
+      queryClient.removeQueries({ queryKey: ['telemetry', id] })
+      queryClient.removeQueries({ queryKey: ['telemetry-history', id] })
+      void queryClient.invalidateQueries({ queryKey: ['devices'] })
+      void queryClient.invalidateQueries({ queryKey: ['statuses'] })
+      void queryClient.invalidateQueries({ queryKey: ['rooms'] })
+      void queryClient.invalidateQueries({ queryKey: ['room-layout'] })
+      void queryClient.invalidateQueries({ queryKey: ['telemetry-summary'] })
+      void queryClient.invalidateQueries({ queryKey: ['audit'] })
+      window.dispatchEvent(new CustomEvent('labguard:device-deleted', { detail: { deviceId: id } }))
+    }
+    stream.addEventListener('device.deleted', deviceDeleted)
     return () => stream.close()
   }, [admin, queryClient])
   return null

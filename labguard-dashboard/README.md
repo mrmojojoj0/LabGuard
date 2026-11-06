@@ -29,6 +29,7 @@ Open the Vite URL printed by npm. Vite proxies `/api` to the local server, so th
 ## Checks and production build
 
 ~~~powershell
+npm test
 npm run typecheck
 npm run build
 npm run preview
@@ -39,6 +40,7 @@ npm run preview
 - `POST /api/v1/auth/login`, `GET /auth/me`, `POST /auth/logout` with the server-managed HttpOnly cookie and CSRF token returned at login. CSRF token is kept only in tab-scoped `sessionStorage` so reloads in that tab retain mutation support; passwords and cookie secrets are never stored by JavaScript.
 - `GET /devices` and `GET /devices/{id}/status` for fleet list, profile, overview counts, connection state, and event-driven status refresh.
 - `GET /devices/{id}/telemetry`, `GET /devices/{id}/telemetry/history`, and `GET /telemetry/summary` for the current system snapshot, bounded history, and live fleet aggregates.
+- `DELETE /devices/{id}` for permanent device removal. LAB_ADMIN and SUPER_ADMIN see a confirmation with the device identity; the server performs the authoritative role/CSRF checks and emits a `device.deleted` event so connected dashboards refresh device, room, status, telemetry, and audit data.
 - `GET /rooms`, `POST /rooms`, `PATCH /rooms/{id}` for room list and authorized room dimension/name/description editing.
 - `GET /enrollment/requests`, approval/rejection endpoints, and `POST /enrollment-codes` for Lab Admin and above.
 - `GET /audit-events?limit=25` for audit activity.

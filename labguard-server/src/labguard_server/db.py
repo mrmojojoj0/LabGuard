@@ -3,6 +3,7 @@ from collections.abc import Generator
 from fastapi import Request
 
 from sqlalchemy import create_engine
+from sqlalchemy import event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -16,6 +17,12 @@ def make_session_factory(database_url: str):
     if database_url in {"sqlite://", "sqlite:///:memory:"}:
         options["poolclass"] = StaticPool
     engine = create_engine(database_url, pool_pre_ping=True, **options)
+    if database_url.startswith("sqlite"):
+        @event.listens_for(engine, "connect")
+        def enable_sqlite_foreign_keys(connection, _record):
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
     return engine, sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 

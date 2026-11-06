@@ -27,6 +27,22 @@ def audit(db: Session, actor_id: UUID | None, action: str, target_type: str, tar
                       target_id=target_id, result="SUCCESS", metadata_json=json.dumps(metadata or {}, separators=(",", ":"))))
 
 
+def delete_device(db: Session, actor_id: UUID, device: Device) -> None:
+    """Revoke credentials, preserve an audit snapshot, and cascade owned device data."""
+    device_id = str(device.id)
+    credential = db.scalar(select(DeviceCredential).where(DeviceCredential.device_id == device.id).with_for_update())
+    if credential is not None:
+        credential.revoked_at = credential.revoked_at or now_utc()
+        db.flush()
+    audit(db, actor_id, "device.delete", "device", device_id, {
+        "assigned_name": device.assigned_name,
+        "hostname": device.hostname,
+        "enrollment_state": device.enrollment_state,
+    })
+    db.delete(device)
+    db.commit()
+
+
 def aware(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 

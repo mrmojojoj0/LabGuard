@@ -13,7 +13,7 @@ from labguard_server.schemas import (DeviceApproval, DeviceChallengeRequest, Dev
                                      LayoutOut, LoginRequest, RoomCreate, RoomLayout, RoomOut, RoomPatch)
 from labguard_server.security import csrf_protected, digest, require_role
 from labguard_server.services import (approve_device, audit, authenticate, create_enrollment_code, create_room,
-                                      create_device_challenge, issue_device_ticket, save_layout, submit_enrollment,
+                                      create_device_challenge, delete_device, issue_device_ticket, save_layout, submit_enrollment,
                                       update_room)
 from labguard_server.telemetry import latest_telemetry, telemetry_history, telemetry_summary
 
@@ -211,6 +211,25 @@ def agent_ticket(body: DeviceTicketRequest, request: Request, db: Session = Depe
 @router.get("/devices", response_model=list[DeviceOut])
 def list_devices(_admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
     return db.scalars(select(Device).order_by(Device.created_at)).all()
+
+
+@router.delete("/devices/{device_id}", status_code=204)
+async def remove_device(device_id: UUID, request: Request,
+                        admin=Depends(require_role("LAB_ADMIN", csrf=True)), db: Session = Depends(get_db)):
+    device = db.scalar(select(Device).where(Device.id == device_id).with_for_update())
+    if device is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Device not found"})
+    active = request.app.state.active_devices.get(device_id)
+    delete_device(db, admin.id, device)
+    if active is not None:
+        if request.app.state.active_devices.get(device_id) is active:
+            request.app.state.active_devices.pop(device_id, None)
+        try:
+            await active.close(code=4404, reason="device_deleted")
+        except RuntimeError:
+            pass
+    request.app.state.admin_events.publish({"type": "device.deleted", "device_id": str(device_id)})
+    return Response(status_code=204)
 
 
 @router.post("/rooms", response_model=RoomOut, status_code=201)
