@@ -36,20 +36,25 @@ def main():
                           default=float(os.getenv("LABGUARD_TELEMETRY_INTERVAL_SECONDS", "30")))
     service.add_argument("--software-inventory-interval-seconds", type=float,
                           default=float(os.getenv("LABGUARD_SOFTWARE_INVENTORY_INTERVAL_SECONDS", "21600")))
+    service.add_argument("--insecure-dev", action="store_true",
+                         help="Allow plaintext HTTP for local development only (prepare/install required)")
     args = parser.parse_args()
     state_dir = Path(args.state_dir)
     if args.command == "service":
+        if args.insecure_dev and args.action not in {"prepare", "install"}:
+            parser.error("service --insecure-dev is valid only with prepare or install")
         state_dir.mkdir(parents=True, exist_ok=True)
         _configure_logging(state_dir)
         if args.action == "prepare":
             if not args.server:
-                parser.error("service prepare requires --server https://...")
+                parser.error("service prepare requires --server https://... (or --insecure-dev for local development)")
             from labguard_client.windows_service import prepare_service
             print(f"Prepared service configuration: {prepare_service(args.server, state_dir, args.telemetry_interval_seconds,
-                                                                       args.software_inventory_interval_seconds)}")
+                                                                       args.software_inventory_interval_seconds,
+                                                                       allow_insecure_dev=args.insecure_dev)}")
         else:
             from labguard_client.windows_service import service_command
-            print(service_command(args.action))
+            print(service_command(args.action, insecure_dev=args.insecure_dev))
         return
 
     state_dir.mkdir(parents=True, exist_ok=True)

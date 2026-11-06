@@ -13,11 +13,14 @@ class AgentConfig:
     timeout: float = 15.0
     telemetry_interval_seconds: float = 30.0
     software_inventory_interval_seconds: float = 6 * 60 * 60
+    allow_insecure_dev: bool = False
 
     def __post_init__(self):
         parsed = urlsplit(self.server_url)
-        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
-            raise ValueError("Service server_url must be an HTTPS URL without embedded credentials")
+        if not isinstance(self.allow_insecure_dev, bool):
+            raise ValueError("allow_insecure_dev must be a boolean")
+        if parsed.scheme not in ({"https", "http"} if self.allow_insecure_dev else {"https"}) or not parsed.netloc or parsed.username or parsed.password:
+            raise ValueError("Service server_url must be HTTPS unless insecure development mode is explicitly enabled, without embedded credentials")
         if parsed.query or parsed.fragment:
             raise ValueError("Service server_url cannot include a query or fragment")
         if not self.state_dir.is_absolute():
@@ -35,7 +38,8 @@ class AgentConfig:
             data = json.loads(path.read_text(encoding="utf-8"))
             return cls(data["server_url"], Path(data["state_dir"]), float(data.get("timeout", 15)),
                        float(data.get("telemetry_interval_seconds", 30)),
-                       float(data.get("software_inventory_interval_seconds", 21600)))
+                       float(data.get("software_inventory_interval_seconds", 21600)),
+                       data.get("allow_insecure_dev", False))
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
             raise ValueError(f"Invalid LabGuard service configuration: {type(exc).__name__}") from exc
 
@@ -44,5 +48,6 @@ class AgentConfig:
         temp = path.with_suffix(path.suffix + ".tmp")
         temp.write_text(json.dumps({"server_url": self.server_url, "state_dir": str(self.state_dir),
             "timeout": self.timeout, "telemetry_interval_seconds": self.telemetry_interval_seconds,
-            "software_inventory_interval_seconds": self.software_inventory_interval_seconds}, indent=2), encoding="utf-8")
+            "software_inventory_interval_seconds": self.software_inventory_interval_seconds,
+            "allow_insecure_dev": self.allow_insecure_dev}, indent=2), encoding="utf-8")
         temp.replace(path)

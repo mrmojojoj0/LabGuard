@@ -45,11 +45,44 @@ py -3.12 -m labguard_client.cli service start
 py -3.12 -m labguard_client.cli service status
 ~~~
 
-`prepare` requires the existing `%PROGRAMDATA%\LabGuard\identity.json`; it migrates DPAPI protection from current-user scope to machine scope while retaining the UUID, key, and sequence. It writes only the HTTPS server URL and state path to `service.json`. TLS verification remains enabled. The service runs as LocalSystem, starts automatically with Windows, logs to `%PROGRAMDATA%\LabGuard\labguard-agent.log`, retries disconnected sessions, and stops by cancelling active async operations and closing the WebSocket. A cross-process lock beside the identity prevents a foreground process and service from using the same identity together.
+`prepare` requires the existing `%PROGRAMDATA%\LabGuard\identity.json`; it migrates DPAPI protection from current-user scope to machine scope while retaining the UUID, key, and sequence. It writes the server URL, state path, and transport policy to `service.json`. The protected ACL grants file/directory full access only to the enrolling account, LocalSystem, and Administrators, with file and directory inheritance retained. HTTPS certificate verification remains enabled. The service runs as LocalSystem, starts automatically with Windows, logs to `%PROGRAMDATA%\LabGuard\labguard-agent.log`, retries disconnected sessions, and stops by cancelling active async operations and closing the WebSocket. A cross-process lock beside the identity prevents a foreground process and service from using the same identity together.
+
+For local development only, `service prepare` accepts an HTTP URL when passed `--insecure-dev`, and that explicit opt-in is persisted in `service.json`. Installing a service configured for HTTP also requires `service install --insecure-dev`; later service start/restart uses the stored setting. HTTPS remains the default and always uses the operating system certificate trust store. Do not use HTTP for Krypton or production devices. Example local development setup:
+
+~~~powershell
+py -3.12 -m labguard_client.cli service prepare --server http://127.0.0.1:8000 --insecure-dev
+py -3.12 -m labguard_client.cli service install --insecure-dev
+~~~
 
 Manage it with `py -3.12 -m labguard_client.cli service start|stop|restart|status|uninstall`. Uninstall retains the identity and configuration. Installation is idempotent. Service management requires an elevated prompt. Do not run the foreground agent while the service is active.
 
-Windows Service runtime behavior, actual DPAPI machine-scope migration, ACL enforcement, and automatic startup require verification on Windows. Manual verification: enroll and approve a test PC; run `service prepare` under the enrolling account; confirm the service starts and reports `RUNNING`; reboot without logging in and confirm the server shows a fresh authenticated heartbeat; stop the service and confirm the heartbeat ceases; start it again and confirm reconnect; run foreground `labguard-agent run` while service is active and confirm it reports duplicate-instance refusal; inspect the state directory ACL and verify only the enrolling account, SYSTEM, and Administrators have access. Do not perform migration tests on a production identity without a backup and a controlled recovery plan.
+Windows Service runtime behavior, actual DPAPI machine-scope migration, ACL enforcement, and automatic startup require verification on Windows. On startup the pywin32 framework reports `SERVICE_RUNNING` before calling LabGuard's `SvcDoRun`; heavyweight agent imports and network initialization happen after that report. For venv installs, service installation stages the host in `.venv\Scripts` with the matching runtime DLLs so the venv's `pyvenv.cfg` and `Lib\site-packages` resolve correctly under LocalSystem. Existing stopped venv services are updated to the staged host without changing their account or startup mode. The service initializes `%PROGRAMDATA%\LabGuard\labguard-agent.log` before reading configuration or decrypting identity and records Python executable/DLL/import paths plus startup exceptions.
+
+On Krypton, rebuild and update the service from elevated PowerShell. This uses the existing configuration and identity; HTTP installations still require the persisted development opt-in and the explicit install flag:
+
+~~~powershell
+$ClientRoot = 'C:\Users\sakin\OneDrive\Desktop\LabGuard\labguard-client'
+$AgentPython = Join-Path $ClientRoot '.venv\Scripts\python.exe'
+Push-Location $ClientRoot
+& $AgentPython -m pip wheel --no-deps --no-build-isolation --wheel-dir .\dist .
+$Wheel = Get-ChildItem -LiteralPath (Join-Path $ClientRoot 'dist') -Filter 'labguard_client-*.whl' |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+& $AgentPython -m pip install --no-deps --force-reinstall $Wheel.FullName
+Pop-Location
+& $AgentPython -m labguard_client.cli service install --insecure-dev
+sc.exe qc LabGuardAgent
+sc.exe queryex LabGuardAgent
+reg.exe query HKLM\SYSTEM\CurrentControlSet\Services\LabGuardAgent /v ImagePath
+reg.exe query HKLM\SYSTEM\CurrentControlSet\Services\LabGuardAgent\PythonClass
+Get-ChildItem (Join-Path $ClientRoot '.venv\Scripts') -Filter '*.dll'
+sc.exe start LabGuardAgent
+Start-Sleep -Seconds 5
+sc.exe queryex LabGuardAgent
+Get-Content C:\ProgramData\LabGuard\labguard-agent.log -Tail 100
+sc.exe stop LabGuardAgent
+~~~
+
+The service now registers the active base Python runtime directory with `os.add_dll_directory()` before importing `DeviceIdentity` and cryptography. The directory handle is retained for the process lifetime. This supplies `python3.dll`, which `_rust.pyd` imports, when LocalSystem does not have the interactive user's Python directory on PATH. The service also creates and installs an `asyncio.SelectorEventLoop` in the pywin32 service thread; the foreground client keeps its existing event-loop behavior. This avoids the default Windows Proactor loop's main-thread-only signal wakeup setup. Service stop/shutdown signal the loop thread-safely, after which pending tasks are cancelled and the loop is closed. Startup exceptions continue to include full tracebacks in the protected log. The direct `pythonservice.exe -debug LabGuardAgent` invocation is not an SCM startup test and must not be used as proof of the root cause. Verify that `ImagePath` now ends in `.venv\Scripts\pythonservice.exe`, confirm `sc.exe queryex` reports RUNNING and a nonzero PID, and inspect the log for `Registered Python native runtime DLL directory`, runtime paths, and an authenticated connection. Review server job state before starting the service because it resumes the existing authenticated agent and may receive already-authorized pending jobs. Then verify stop/restart behavior and inspect the protected state ACL. Do not perform migration tests on a production identity without a backup and controlled recovery plan.
 
 The client tests are in `tests/`; install them with `python -m pip install -e ".[test]"` and run `python -m pytest -q` from this project.
 
@@ -57,7 +90,7 @@ The client tests are in `tests/`; install them with `python -m pip install -e ".
 
 After WSS authentication, the client reads installed application metadata from the Windows uninstall registry in both 64-bit and 32-bit views, and from HKCU plus ordinary user registry hives that are currently loaded and accessible. It reports bounded app name, version, publisher, architecture, install date/location, package identifier, source, and machine/user scope. It does not read uninstall command lines, run installers, or inspect user files. Registry access failures are recorded as bounded error codes and make the scan partial.
 
-If available, the agent also queries WinGet and Chocolatey with fixed argument lists and no shell. Those results are identified by source; package manager absence or failure does not discard registry results. WinGet discovery checks PATH and the current account's WindowsApps alias and logs a reason code for missing executable, access denial, timeout, App Installer registration, command failure, or unusable output, along with the account/session and safe environment-presence facts. The reported Krypton service-context failure still requires device-side diagnostic confirmation. Per-user applications in unloaded hives are omitted. Foreground collection can read the current user's accessible hive; a service only sees loaded hives accessible to its service token. Do not switch service accounts as a workaround for software management.
+If available, the agent also queries WinGet and Chocolatey with fixed argument lists and no shell. Those results are identified by source; package manager absence or failure does not discard registry results. WinGet inventory and job execution share one resolver: it checks the current execution identity's WindowsApps alias and the machine App Installer package directories under `ProgramW6432`, `ProgramFiles`, and `ProgramFiles(x86)`, before accepting PATH results that resolve to one of those known locations. Machine App Installer discovery does not depend on an interactive user's PATH or profile, so it can locate the executable under LocalSystem in Session 0. The agent logs a reason code for missing executable, access denial, timeout, App Installer registration, command failure, or unusable output, along with the account/session and safe environment-presence facts. Per-user applications in unloaded hives are omitted. Foreground collection can read the current user's accessible hive; a service only sees loaded hives accessible to its service token. Do not switch service accounts as a workaround for software management. A live LocalSystem inventory and installation check remains required on Krypton.
 
 Inventory is sent over the existing ticket-authenticated WSS session as typed `client.software_inventory` batches, capped at 48 KiB and 100 entries per batch. A matching `server.ack` acknowledges each batch. The client sends a full initial scan, then reports an unchanged digest without resending entries when nothing changed. It scans every six hours by default. Configure `--software-inventory-interval-seconds` or `LABGUARD_SOFTWARE_INVENTORY_INTERVAL_SECONDS`; allowed values are 300 seconds to 7 days. The same CLI option/environment variable is used by service preparation, and older service configuration files default to six hours. A server-issued `server.software_inventory.refresh` event triggers an immediate full scan. Inventory collection runs in a worker thread and failures do not interrupt heartbeat handling.
 

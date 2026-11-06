@@ -264,6 +264,20 @@ class AgentClient:
             logging.getLogger("labguard_client").warning(
                 "Could not persist software inventory fingerprint (%s)", type(exc).__name__)
 
+    async def _send_inventory_event(self, ws: ClientConnection, payload: dict,
+                                    pending: dict[str, asyncio.Future], send_lock: asyncio.Lock):
+        ack = await self._send_session_event(ws, "client.software_inventory", payload, pending, send_lock)
+        if ack.get("reason") != "inventory_rate_limited":
+            return ack
+        retry_after = ack.get("retry_after_seconds")
+        if (not isinstance(retry_after, (int, float)) or isinstance(retry_after, bool)
+                or not 1 <= retry_after <= 60):
+            return ack
+        # Inventory transfer is a background task; a short bounded retry must
+        # not block heartbeats or interrupt the authenticated session.
+        await asyncio.sleep(retry_after)
+        return await self._send_session_event(ws, "client.software_inventory", payload, pending, send_lock)
+
     async def _collect_and_send_software_inventory(self, ws: ClientConnection, pending: dict,
                                                     send_lock: asyncio.Lock, *, request_id: str | None,
                                                     force: bool, collected=None, job_id: str | None = None) -> bool:
@@ -276,7 +290,7 @@ class AgentClient:
                   "inventory_digest": digest, "errors": collected.errors, "job_id": job_id}
         if not force and collected.complete and digest == self._read_inventory_digest():
             payload = {**common, "batch_index": 0, "batch_count": 1, "unchanged": True, "entries": []}
-            ack = await self._send_session_event(ws, "client.software_inventory", payload, pending, send_lock)
+            ack = await self._send_inventory_event(ws, payload, pending, send_lock)
             if ack.get("accepted"):
                 self._save_inventory_digest(digest)
                 return True
@@ -288,7 +302,7 @@ class AgentClient:
         for index, entries in enumerate(batches):
             payload = {**common, "batch_index": index, "batch_count": len(batches),
                        "unchanged": False, "entries": entries}
-            ack = await self._send_session_event(ws, "client.software_inventory", payload, pending, send_lock)
+            ack = await self._send_inventory_event(ws, payload, pending, send_lock)
             if not ack.get("accepted"):
                 logger.warning("Software inventory batch was rejected (%s)", ack.get("reason", "unknown"))
                 return False

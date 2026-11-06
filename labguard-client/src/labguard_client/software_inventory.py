@@ -13,6 +13,10 @@ import shutil
 import subprocess
 import getpass
 from typing import Any
+from labguard_client.winget_discovery import (
+    WingetExecutableNotFound,
+    discover_winget_executable,
+)
 
 REGISTRY_PATH = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
 MAX_ENTRIES = 10_000
@@ -191,25 +195,20 @@ def _run_fixed_command(command: list[str], timeout: float = 20.0) -> str:
     return completed.stdout[:2_000_000]
 
 
-def _winget_entries(which, run, errors):
-    executable = which("winget")
-    if not executable:
-        # The Windows App Execution Alias is commonly outside a service
-        # account's PATH. Check only the current execution identity's alias.
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        if local_app_data:
-            alias = os.path.join(local_app_data, "Microsoft", "WindowsApps", "winget.exe")
-            if os.path.isfile(alias):
-                executable = alias
-    if not executable:
+def _winget_entries(which, run, errors, environ=None):
+    env = os.environ if environ is None else environ
+    try:
+        executable = discover_winget_executable(which=which, environ=env)
+    except WingetExecutableNotFound:
         logger = logging.getLogger("labguard_client")
         account, session = _execution_context()
         logger.warning("WinGet inventory discovery failed reason=executable_not_found account=%s session=%s local_app_data_present=%s path_entries=%d",
-                       account, session, bool(os.environ.get("LOCALAPPDATA")), len(os.environ.get("PATH", "").split(os.pathsep)))
+                       account, session, bool(env.get("LOCALAPPDATA")), len(env.get("PATH", "").split(os.pathsep)))
         errors.append("winget_executable_not_found")
         return [], False
     try:
-        output = run([executable, "list", "--disable-interactivity", "--accept-source-agreements", "--count", "2000"])
+        # WinGet currently permits list --count values only up to 1000.
+        output = run([executable, "list", "--disable-interactivity", "--accept-source-agreements", "--count", "1000"])
         lines = output.splitlines()
         header_index = next((i for i, line in enumerate(lines) if re.search(r"\bID\b", line, re.I)
                              and re.search(r"\bVersion\b", line, re.I)), None)

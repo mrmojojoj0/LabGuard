@@ -20,7 +20,7 @@ def secure_state_directory(path: Path) -> None:
     dacl = win32security.ACL()
     inherit = win32security.OBJECT_INHERIT_ACE | win32security.CONTAINER_INHERIT_ACE
     for sid in (system_sid, admins_sid, current_sid):
-        dacl.AddAccessAllowedAceEx(win32security.ACL_REVISION_DS, inherit, win32con.FILE_ALL_ACCESS, sid)
+        dacl.AddAccessAllowedAceEx(win32security.ACL_REVISION_DS, inherit, win32con.GENERIC_ALL, sid)
     def apply(target: Path) -> None:
         win32security.SetNamedSecurityInfo(str(target), win32security.SE_FILE_OBJECT,
             win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION,

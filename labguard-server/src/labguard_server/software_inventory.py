@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import hashlib
+from math import ceil
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -42,8 +43,10 @@ def record_software_inventory_batch(db: Session, device_id: UUID, sequence: int,
             SoftwareInventoryCollection.received_at > now - timedelta(seconds=min_interval_seconds),
         ).order_by(SoftwareInventoryCollection.received_at.desc()).limit(1))
         if recent is not None:
+            remaining = min_interval_seconds - (now - _utc(recent.received_at)).total_seconds()
             db.commit()
-            return {"accepted": False, "reason": "inventory_rate_limited"}, False
+            return {"accepted": False, "reason": "inventory_rate_limited",
+                    "retry_after_seconds": max(1, ceil(remaining))}, False
 
     if payload.unchanged:
         previous = db.scalar(select(SoftwareInventoryCollection).where(

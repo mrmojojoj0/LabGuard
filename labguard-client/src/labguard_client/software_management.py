@@ -12,6 +12,10 @@ import tempfile
 import time
 from typing import Callable
 from urllib.parse import urlsplit
+from labguard_client.winget_discovery import (
+    WingetExecutableNotFound,
+    discover_winget_executable,
+)
 
 PACKAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
 PACKAGE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
@@ -106,7 +110,8 @@ def running_as_local_system() -> bool:
         token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
         current_sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
         system_sid = win32security.CreateWellKnownSid(win32security.WinLocalSystemSid, None)
-        return win32security.EqualSid(current_sid, system_sid)
+        return (win32security.ConvertSidToStringSid(current_sid).casefold()
+                == win32security.ConvertSidToStringSid(system_sid).casefold())
     except (ImportError, OSError, AttributeError):
         return False
 
@@ -157,13 +162,10 @@ def _discover(name: str, known_paths: list[Path], which: Callable[[str], str | N
 
 def discover_winget(which: Callable[[str], str | None] = shutil.which,
                     environ: dict[str, str] | None = None) -> str:
-    env = os.environ if environ is None else environ
-    local = env.get("LOCALAPPDATA")
-    candidates = [Path(local) / "Microsoft" / "WindowsApps" / "winget.exe"] if local else []
-    program_files = env.get("ProgramFiles")
-    if program_files:
-        candidates.extend(Path(program_files).glob("WindowsApps/Microsoft.DesktopAppInstaller_*/winget.exe"))
-    return _discover("winget", candidates, which)
+    try:
+        return discover_winget_executable(which=which, environ=environ)
+    except WingetExecutableNotFound as exc:
+        raise PackageManagerUnavailable("winget_not_found") from exc
 
 
 def discover_chocolatey(which: Callable[[str], str | None] = shutil.which,

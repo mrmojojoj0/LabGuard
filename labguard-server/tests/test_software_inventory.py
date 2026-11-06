@@ -119,6 +119,33 @@ def test_unchanged_report_refreshes_health_without_resending_items(client):
             SoftwareInventoryCollection.status == "UNCHANGED")) is not None
 
 
+def test_inventory_ingest_throttle_returns_retry_time_separate_from_refresh_cooldown(client):
+    device_id, _ = enroll(client, "INVENTORY-RATE-LIMIT-PC")
+    with client.app.state.session_factory() as db:
+        first, completed = record_software_inventory_batch(
+            db, device_id, 1, batch(uuid4(), 0, 1, [entry("First scan")]), 10, 90)
+    assert first["accepted"] and completed
+
+    with client.app.state.session_factory() as db:
+        limited, completed = record_software_inventory_batch(
+            db, device_id, 2, batch(uuid4(), 0, 1, [entry("Retry scan")]), 10, 90)
+
+    assert not completed
+    assert limited["accepted"] is False
+    assert limited["reason"] == "inventory_rate_limited"
+    assert 1 <= limited["retry_after_seconds"] <= 10
+
+
+def test_inventory_min_interval_setting_is_bounded():
+    from labguard_server.config import Settings
+
+    base = {"database_url": "sqlite:///labguard.db", "session_secret": "s" * 32}
+    Settings(**base, software_inventory_min_interval_seconds=10).validate()
+    for value in (0, 61):
+        with pytest.raises(RuntimeError, match="Software inventory cooldown"):
+            Settings(**base, software_inventory_min_interval_seconds=value).validate()
+
+
 def test_inventory_validation_authentication_and_filter_pagination(client):
     device_id, _ = enroll(client, "API-INVENTORY-PC")
     with pytest.raises(ValidationError):

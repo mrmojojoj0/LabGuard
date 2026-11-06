@@ -5,6 +5,8 @@ import json
 import subprocess
 from types import SimpleNamespace
 
+import pytest
+
 from labguard_client.agent import AgentClient
 from labguard_client.identity import DeviceIdentity
 from labguard_client.service_config import AgentConfig
@@ -111,9 +113,12 @@ def test_registry_collector_reads_both_views_loaded_profiles_and_deduplicates():
     assert "registry_entry_access_denied" in inventory.errors
 
 
-def test_optional_package_managers_can_be_absent_or_fail_without_losing_registry_data(monkeypatch):
+def test_optional_package_managers_can_be_absent_or_fail_without_losing_registry_data(tmp_path, monkeypatch):
     registry = _Registry()
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    no_app_installer = tmp_path / "not-installed"
+    monkeypatch.setenv("ProgramFiles", str(no_app_installer))
+    monkeypatch.setenv("ProgramW6432", str(no_app_installer))
     absent = collect_software_inventory(winreg_module=registry, which=lambda _name: None,
                                         run=lambda _command: "", windows=True)
     assert absent.detected_package_managers == []
@@ -122,6 +127,11 @@ def test_optional_package_managers_can_be_absent_or_fail_without_losing_registry
     def fail(_command):
         raise subprocess.TimeoutExpired(_command, 20)
 
+    machine_winget = (tmp_path / "WindowsApps" /
+        "Microsoft.DesktopAppInstaller_1.27.350.0_x64__8wekyb3d8bbwe" / "winget.exe")
+    machine_winget.parent.mkdir(parents=True)
+    machine_winget.touch()
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
     partial = collect_software_inventory(winreg_module=registry, which=lambda name: name,
                                           run=fail, windows=True)
     assert partial.detected_package_managers == ["WINGET", "CHOCO"]
@@ -166,6 +176,24 @@ def test_winget_failures_have_distinct_diagnostics(caplog):
     assert "account=" in caplog.text and "session=" in caplog.text
 
 
+def test_winget_inventory_uses_supported_list_count(tmp_path):
+    from labguard_client.software_inventory import _winget_entries
+
+    alias = tmp_path / "Microsoft" / "WindowsApps" / "winget.exe"
+    alias.parent.mkdir(parents=True)
+    alias.touch()
+    commands = []
+    output = f"{'Name':<20} {'Id':<24} {'Version':<12}\n{'Example Editor':<20} {'Example.Editor':<24} {'1.0':<12}\n"
+    errors = []
+    entries, detected = _winget_entries(lambda _name: None,
+        lambda command: commands.append(command) or output, errors,
+        environ={"LOCALAPPDATA": str(tmp_path)})
+
+    assert detected and not errors and entries
+    assert commands[0][1:] == ["list", "--disable-interactivity", "--accept-source-agreements",
+                               "--count", "1000"]
+
+
 def test_winget_process_failure_classifies_registration_and_access_denial(monkeypatch):
     from labguard_client.software_inventory import _run_fixed_command
 
@@ -190,19 +218,65 @@ def test_winget_process_failure_classifies_registration_and_access_denial(monkey
         assert str(exc).startswith("access_denied:5")
 
 
-def test_winget_alias_discovery_uses_current_execution_context(monkeypatch):
+def test_winget_alias_discovery_uses_current_execution_context(tmp_path):
     from labguard_client.software_inventory import _winget_entries
 
-    monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\service\\AppData\\Local")
-    monkeypatch.setattr("labguard_client.software_inventory.os.path.isfile", lambda path: path.lower().endswith("winget.exe"))
+    alias = tmp_path / "Microsoft" / "WindowsApps" / "winget.exe"
+    alias.parent.mkdir(parents=True)
+    alias.touch()
     commands = []
     output = f"{'Name':<20} {'Id':<24} {'Version':<12}\n{'Example Editor':<20} {'Example.Editor':<24} {'1.0':<12}\n"
     errors = []
     entries, detected = _winget_entries(lambda _name: None,
-        lambda command: commands.append(command) or output, errors)
+        lambda command: commands.append(command) or output, errors,
+        environ={"LOCALAPPDATA": str(tmp_path), "PATH": "C:\\Windows\\System32"})
     assert detected and not errors
-    assert commands[0][0].lower().endswith("windowsapps/winget.exe") or commands[0][0].lower().endswith("windowsapps\\winget.exe")
+    assert commands[0][0] == str(alias)
     assert entries[0]["package_id"] == "Example.Editor"
+
+
+def test_winget_inventory_discovers_machine_app_installer_in_system_context(tmp_path):
+    from labguard_client.software_inventory import _winget_entries
+    from labguard_client.software_management import discover_winget
+
+    executable = (tmp_path / "WindowsApps" /
+        "Microsoft.DesktopAppInstaller_1.27.350.0_x64__8wekyb3d8bbwe" / "winget.exe")
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    system_environment = {"ProgramFiles": str(tmp_path), "PATH": r"C:\Windows\System32"}
+    commands = []
+    errors = []
+    output = f"{'Name':<20} {'Id':<24} {'Version':<12}\n{'Example Editor':<20} {'Example.Editor':<24} {'1.0':<12}\n"
+
+    entries, detected = _winget_entries(lambda _name: None,
+        lambda command: commands.append(command) or output, errors,
+        environ=system_environment)
+
+    assert detected and not errors
+    assert entries[0]["package_id"] == "Example.Editor"
+    assert commands[0][0] == str(executable)
+    assert discover_winget(which=lambda _name: None, environ=system_environment) == str(executable)
+
+
+def test_winget_missing_executable_is_reported_in_local_system_like_environment(tmp_path):
+    from labguard_client.software_inventory import _winget_entries
+    from labguard_client.software_management import PackageManagerUnavailable, discover_winget
+
+    system_environment = {"PATH": r"C:\Windows\System32"}
+    interactive_alias = (tmp_path / "interactive-user" / "AppData" / "Local" /
+                         "Microsoft" / "WindowsApps" / "winget.exe")
+    interactive_alias.parent.mkdir(parents=True)
+    interactive_alias.touch()
+    # Even if a caller's PATH lookup leaks the interactive alias, LocalSystem
+    # must not select it when that profile is not in its execution environment.
+    which = lambda _name: str(interactive_alias)
+    errors = []
+    entries, detected = _winget_entries(which, lambda _command: "", errors,
+                                        environ=system_environment)
+    assert entries == [] and not detected
+    assert errors == ["winget_executable_not_found"]
+    with pytest.raises(PackageManagerUnavailable, match="winget_not_found"):
+        discover_winget(which=which, environ=system_environment)
 
 
 def test_inventory_batching_is_bounded_and_digest_is_stable():
@@ -264,3 +338,36 @@ def test_agent_sends_full_initial_inventory_skips_unchanged_and_forces_admin_ref
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
     asyncio.run(exercise())
+
+
+def test_agent_retries_rate_limited_inventory_with_server_delay(monkeypatch):
+    from labguard_client.agent import AgentClient
+    from labguard_client.identity import DeviceIdentity
+
+    client = AgentClient("https://labguard.example", DeviceIdentity.ephemeral())
+    calls = []
+    delays = []
+    responses = iter([
+        {"accepted": False, "reason": "inventory_rate_limited", "retry_after_seconds": 2},
+        {"accepted": True, "completed": True},
+    ])
+
+    async def send(_ws, event_type, payload, _pending, _lock):
+        calls.append((event_type, payload))
+        return next(responses)
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(client, "_send_session_event", send)
+    monkeypatch.setattr("labguard_client.agent.asyncio.sleep", sleep)
+
+    async def exercise():
+        return await client._collect_and_send_software_inventory(
+            object(), {}, asyncio.Lock(), request_id=None, force=True,
+            collected=SimpleNamespace(entries=[{"entry_key": "a" * 64, "name": "Editor"}],
+                                     errors=[], complete=True))
+
+    assert asyncio.run(exercise()) is True
+    assert delays == [2]
+    assert len(calls) == 2 and calls[0][0] == calls[1][0] == "client.software_inventory"

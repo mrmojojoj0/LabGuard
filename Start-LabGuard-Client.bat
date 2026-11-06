@@ -1,39 +1,57 @@
 @echo off
 setlocal
-set "ROOT=%~dp0"
-set "CLIENT=%ROOT%labguard-client"
-set "PYTHON=%CLIENT%\.venv\Scripts\python.exe"
-set "SERVER_URL=%LABGUARD_SERVER_URL%"
-set "STATE_DIR=%LABGUARD_STATE_DIR%"
-set "DEV_FLAG="
-if not defined SERVER_URL set "SERVER_URL=http://127.0.0.1:8000"
-if not defined STATE_DIR set "STATE_DIR=%PROGRAMDATA%\LabGuard"
-if /I "%SERVER_URL:~0,7%"=="http://" (
-  if not "%LABGUARD_ALLOW_INSECURE_DEV%"=="1" (
-    echo Plain HTTP requires explicit development opt-in.
-    echo Set LABGUARD_ALLOW_INSECURE_DEV=1 in this window, then retry.
+
+set "CLIENT_ROOT=C:\Users\sakin\OneDrive\Desktop\LabGuard\labguard-client"
+set "PYTHON=%CLIENT_ROOT%\.venv\Scripts\python.exe"
+set "SERVICE=LabGuardAgent"
+set "LOG=C:\ProgramData\LabGuard\labguard-agent.log"
+
+title LabGuard Service Restart
+
+:: Check for Administrator privileges.
+net session >nul 2>&1
+if not "%errorlevel%"=="0" (
+    echo Requesting Administrator privileges...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    exit /b
+)
+
+if not exist "%PYTHON%" (
+    echo ERROR: Python environment not found:
+    echo %PYTHON%
     pause
     exit /b 1
-  )
-  set "DEV_FLAG=--insecure-dev"
 )
-if not exist "%PYTHON%" (
-  echo Client environment missing. See labguard-client\README.md.
-  pause
-  exit /b 1
+
+echo.
+echo === LabGuard: stopping service ===
+"%PYTHON%" -m labguard_client.cli service stop
+if errorlevel 1 (
+    echo WARNING: Stop command returned an error. Checking service state...
+    sc.exe query "%SERVICE%"
 )
-if /I "%~1"=="enroll" (
-  "%PYTHON%" -m labguard_client.cli enroll --server "%SERVER_URL%" --state-dir "%STATE_DIR%" %DEV_FLAG%
-  if errorlevel 1 pause
-  exit /b
+
+echo.
+echo === LabGuard: starting service ===
+"%PYTHON%" -m labguard_client.cli service start
+if errorlevel 1 (
+    echo ERROR: Service start command failed.
+    goto show_logs
 )
-if not exist "%STATE_DIR%\identity.json" (
-  echo No device identity exists. Run this launcher with the enroll argument first.
-  echo Example: set LABGUARD_SERVER_URL=https://your-server-name:8000
-  echo Then: Start-LabGuard-Client.bat enroll
-  pause
-  exit /b 1
+
+echo.
+echo === LabGuard: service status ===
+sc.exe queryex "%SERVICE%"
+
+:show_logs
+echo.
+echo === Latest LabGuard agent log entries ===
+if exist "%LOG%" (
+    powershell -NoProfile -Command "Get-Content -LiteralPath '%LOG%' -Tail 40"
+) else (
+    echo Log file not found: %LOG%
 )
-"%PYTHON%" -m labguard_client.cli run --server "%SERVER_URL%" --state-dir "%STATE_DIR%" %DEV_FLAG%
-if errorlevel 1 pause
-endlocal
+
+echo.
+echo Restart check complete.
+pause

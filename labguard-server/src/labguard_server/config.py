@@ -21,6 +21,7 @@ class Settings:
     telemetry_stale_after_seconds: int = 120
     telemetry_min_interval_seconds: float = 10.0
     software_inventory_refresh_cooldown_seconds: int = 300
+    software_inventory_min_interval_seconds: float = 10.0
     software_inventory_stale_after_seconds: int = 604800
     software_inventory_retention_days: int = 90
     chocolatey_source_url: str | None = None
@@ -45,6 +46,7 @@ class Settings:
             telemetry_stale_after_seconds=int(os.getenv("TELEMETRY_STALE_AFTER_SECONDS", "120")),
             telemetry_min_interval_seconds=float(os.getenv("TELEMETRY_MIN_INTERVAL_SECONDS", "10")),
             software_inventory_refresh_cooldown_seconds=int(os.getenv("SOFTWARE_INVENTORY_REFRESH_COOLDOWN_SECONDS", "300")),
+            software_inventory_min_interval_seconds=float(os.getenv("SOFTWARE_INVENTORY_MIN_INTERVAL_SECONDS", "10")),
             software_inventory_stale_after_seconds=int(os.getenv("SOFTWARE_INVENTORY_STALE_AFTER_SECONDS", "604800")),
             software_inventory_retention_days=int(os.getenv("SOFTWARE_INVENTORY_RETENTION_DAYS", "90")),
             chocolatey_source_url=os.getenv("CHOCOLATEY_SOURCE_URL") or None,
@@ -66,6 +68,7 @@ class Settings:
                 and 1 <= self.telemetry_min_interval_seconds <= 3600):
             raise RuntimeError("Telemetry retention, stale threshold, and minimum interval are outside supported bounds")
         if not (30 <= self.software_inventory_refresh_cooldown_seconds <= 86400
+                and 1 <= self.software_inventory_min_interval_seconds <= 60
                 and 3600 <= self.software_inventory_stale_after_seconds <= 2_592_000
                 and 1 <= self.software_inventory_retention_days <= 3650):
             raise RuntimeError("Software inventory cooldown, stale threshold, and retention are outside supported bounds")

@@ -256,7 +256,7 @@ async def agent_session(websocket: WebSocket):
                 try:
                     result, completed = await asyncio.to_thread(_persist_software_inventory,
                         websocket.app.state.session_factory, device_id, event.sequence, inventory,
-                        websocket.app.state.settings.software_inventory_refresh_cooldown_seconds,
+                        websocket.app.state.settings.software_inventory_min_interval_seconds,
                         websocket.app.state.settings.software_inventory_retention_days,
                         manual_refresh_authorized, job_refresh_authorized)
                 except HTTPException:

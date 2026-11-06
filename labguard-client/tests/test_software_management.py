@@ -89,6 +89,30 @@ def test_service_context_rejects_interactive_user_job_and_unprivileged_machine_j
             service_context=True, which=lambda _name: None)
 
 
+def test_local_system_detection_uses_supported_pywin32_sid_conversion(monkeypatch):
+    import labguard_client.software_management as management
+
+    monkeypatch.setattr(management.os, "name", "nt")
+    current_sid = object()
+    system_sid = object()
+    fake_security = types.SimpleNamespace(
+        OpenProcessToken=lambda _process, _access: "token",
+        GetTokenInformation=lambda _token, _kind: (current_sid, 0),
+        TokenUser=1,
+        WinLocalSystemSid=5,
+        CreateWellKnownSid=lambda _kind, _domain: system_sid,
+        ConvertSidToStringSid=lambda sid: {current_sid: "S-1-5-18", system_sid: "s-1-5-18"}[sid],
+    )
+    monkeypatch.setitem(sys.modules, "win32api", types.SimpleNamespace(GetCurrentProcess=lambda: "process"))
+    monkeypatch.setitem(sys.modules, "win32con", types.SimpleNamespace(TOKEN_QUERY=8))
+    monkeypatch.setitem(sys.modules, "win32security", fake_security)
+
+    assert management.running_as_local_system() is True
+
+    fake_security.ConvertSidToStringSid = lambda sid: "S-1-5-21-user" if sid is current_sid else "S-1-5-18"
+    assert management.running_as_local_system() is False
+
+
 def test_operation_calls_mocked_manager_without_shell_and_sanitizes_output():
     calls = []
 
