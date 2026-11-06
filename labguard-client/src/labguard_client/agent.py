@@ -7,9 +7,10 @@ import json
 import logging
 import platform
 import random
+import re
 import socket
 import ssl
-import logging
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,11 +22,15 @@ from websockets.asyncio.client import ClientConnection, connect
 from labguard_client.identity import DeviceIdentity
 from labguard_client.instance import IdentityProcessLock
 from labguard_client.telemetry import collect_system_telemetry
+from labguard_client.software_inventory import batch_entries, collect_software_inventory, inventory_digest
+from labguard_client.software_management import (PackageManagerUnavailable, SoftwareJobOffer,
+                                                 UnsupportedExecutionContext, execute_package_job)
 
 
 class AgentClient:
     def __init__(self, server_url: str, identity: DeviceIdentity, *, agent_version: str = "0.1.0",
                  heartbeat_interval: float = 10.0, telemetry_interval_seconds: float = 30.0,
+                 software_inventory_interval_seconds: float = 6 * 60 * 60,
                  timeout: float = 15.0, allow_insecure_dev: bool = False):
         if not server_url.startswith(("https://", "http://")):
             raise ValueError("Server URL must use HTTPS (HTTP is only for local development)")
@@ -38,6 +43,9 @@ class AgentClient:
         if not 10 <= telemetry_interval_seconds <= 3600:
             raise ValueError("Telemetry interval must be between 10 and 3600 seconds")
         self.telemetry_interval_seconds = telemetry_interval_seconds
+        if not 300 <= software_inventory_interval_seconds <= 604800:
+            raise ValueError("Software inventory interval must be between 300 and 604800 seconds")
+        self.software_inventory_interval_seconds = software_inventory_interval_seconds
         self.timeout = timeout
         self.boot_id = str(uuid4())
         self.ssl_context = ssl.create_default_context()
@@ -102,9 +110,27 @@ class AgentClient:
             raise RuntimeError("Heartbeat was not acknowledged")
         return ack
 
-    async def _read_session_acks(self, ws: ClientConnection, pending: dict[str, asyncio.Future]):
+    async def _read_session_acks(self, ws: ClientConnection, pending: dict[str, asyncio.Future],
+                                 inventory_requests: asyncio.Queue, job_offers: asyncio.Queue | None = None):
         while True:
             message = json.loads(await ws.recv())
+            if message.get("type") == "server.software_job.offer":
+                if (message.get("protocol") != "labguard.agent"
+                        or message.get("schema_version") != 1
+                        or message.get("device_id") != self.identity.device_id
+                        or job_offers is None):
+                    logging.getLogger("labguard_client").warning("Rejected software job offer envelope")
+                    continue
+                try:
+                    job_offers.put_nowait(message.get("payload"))
+                except asyncio.QueueFull:
+                    logging.getLogger("labguard_client").warning("Software job offer queue is full")
+                continue
+            if message.get("type") == "server.software_inventory.refresh":
+                payload = message.get("payload", {})
+                request_id = payload.get("request_id") if isinstance(payload, dict) else None
+                inventory_requests.put_nowait(request_id if isinstance(request_id, str) else None)
+                continue
             if message.get("type") != "server.ack":
                 continue
             event_id = message.get("payload", {}).get("event_id")
@@ -114,26 +140,31 @@ class AgentClient:
 
     async def _send_session_event(self, ws: ClientConnection, event_type: str, payload: dict,
                                   pending: dict[str, asyncio.Future], send_lock: asyncio.Lock):
-        envelope = self._envelope(event_type, payload)
-        encoded = json.dumps(envelope, separators=(",", ":"))
-        if len(encoded.encode("utf-8")) > 60 * 1024:
-            raise ValueError("Telemetry/event frame exceeds the safe 60 KiB client limit")
-        event_id = envelope["event_id"]
-        future = asyncio.get_running_loop().create_future()
-        pending[event_id] = future
+        event_id = None
+        future = None
         try:
             async with send_lock:
+                envelope = self._envelope(event_type, payload)
+                encoded = json.dumps(envelope, separators=(",", ":"))
+                if len(encoded.encode("utf-8")) > 60 * 1024:
+                    raise ValueError("Telemetry/event frame exceeds the safe 60 KiB client limit")
+                event_id = envelope["event_id"]
+                future = asyncio.get_running_loop().create_future()
+                pending[event_id] = future
                 await ws.send(encoded)
             return await asyncio.wait_for(future, timeout=self.timeout)
         finally:
-            pending.pop(event_id, None)
-            if not future.done():
+            if event_id is not None:
+                pending.pop(event_id, None)
+            if future is not None and not future.done():
                 future.cancel()
 
     async def _run_connected_session(self, ws: ClientConnection, stop: asyncio.Event):
         logger = logging.getLogger("labguard_client")
         pending: dict[str, asyncio.Future] = {}
         send_lock = asyncio.Lock()
+        inventory_requests: asyncio.Queue[str | None] = asyncio.Queue()
+        job_offers: asyncio.Queue[dict] = asyncio.Queue(maxsize=8)
 
         async def heartbeat_loop():
             while not await self._wait_or_stop(stop, self.heartbeat_interval):
@@ -156,12 +187,45 @@ class AgentClient:
                 if await self._wait_or_stop(stop, self.telemetry_interval_seconds):
                     break
 
-        tasks = [asyncio.create_task(self._read_session_acks(ws, pending)),
+        async def software_inventory_loop():
+            first_collection = True
+            while not stop.is_set():
+                if first_collection:
+                    request_id, force = None, False
+                    first_collection = False
+                else:
+                    try:
+                        request_id = await asyncio.wait_for(inventory_requests.get(),
+                                                            timeout=self.software_inventory_interval_seconds)
+                        force = request_id is not None
+                    except TimeoutError:
+                        request_id, force = None, False
+                try:
+                    await self._collect_and_send_software_inventory(ws, pending, send_lock,
+                        request_id=request_id, force=force)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Software inventory collection/transmission failed (%s)", type(exc).__name__)
+
+        async def software_job_loop():
+            while not stop.is_set():
+                payload = await job_offers.get()
+                try:
+                    await self._run_software_job(payload, ws, pending, send_lock)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.exception("Software job processing failed (%s)", type(exc).__name__)
+
+        tasks = [asyncio.create_task(self._read_session_acks(ws, pending, inventory_requests, job_offers)),
                  asyncio.create_task(heartbeat_loop()), asyncio.create_task(telemetry_loop()),
+                 asyncio.create_task(software_inventory_loop()),
+                 asyncio.create_task(software_job_loop()),
                  asyncio.create_task(stop.wait())]
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            if tasks[3] in done:
+            if tasks[5] in done:
                 return
             for task in done:
                 if task is tasks[0]:
@@ -173,6 +237,247 @@ class AgentClient:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _inventory_digest_path(self):
+        state_file = getattr(self.identity, "state_file", None)
+        return state_file.parent / "software-inventory.sha256" if state_file else None
+
+    def _read_inventory_digest(self) -> str | None:
+        path = self._inventory_digest_path()
+        if path is None:
+            return None
+        try:
+            value = path.read_text(encoding="ascii").strip()
+            return value if re.fullmatch(r"[0-9a-f]{64}", value) else None
+        except OSError:
+            return None
+
+    def _save_inventory_digest(self, value: str) -> None:
+        path = self._inventory_digest_path()
+        if path is None:
+            return
+        try:
+            temp = path.with_suffix(path.suffix + ".tmp")
+            temp.write_text(value + "\n", encoding="ascii")
+            temp.replace(path)
+        except OSError as exc:
+            logging.getLogger("labguard_client").warning(
+                "Could not persist software inventory fingerprint (%s)", type(exc).__name__)
+
+    async def _collect_and_send_software_inventory(self, ws: ClientConnection, pending: dict,
+                                                    send_lock: asyncio.Lock, *, request_id: str | None,
+                                                    force: bool, collected=None, job_id: str | None = None) -> bool:
+        logger = logging.getLogger("labguard_client")
+        started_at = datetime.now(UTC).isoformat()
+        collected = collected or await asyncio.to_thread(collect_software_inventory)
+        digest = inventory_digest(collected.entries)
+        common = {"collection_id": str(uuid4()), "request_id": request_id, "inventory_version": 1,
+                  "started_at": started_at, "collection_status": "COMPLETE" if collected.complete else "PARTIAL",
+                  "inventory_digest": digest, "errors": collected.errors, "job_id": job_id}
+        if not force and collected.complete and digest == self._read_inventory_digest():
+            payload = {**common, "batch_index": 0, "batch_count": 1, "unchanged": True, "entries": []}
+            ack = await self._send_session_event(ws, "client.software_inventory", payload, pending, send_lock)
+            if ack.get("accepted"):
+                self._save_inventory_digest(digest)
+                return True
+            if not ack.get("full_refresh_required"):
+                logger.warning("Unchanged software inventory report was rejected (%s)", ack.get("reason", "unknown"))
+                return False
+            common["collection_id"] = str(uuid4())
+        batches = batch_entries(collected.entries, common)
+        for index, entries in enumerate(batches):
+            payload = {**common, "batch_index": index, "batch_count": len(batches),
+                       "unchanged": False, "entries": entries}
+            ack = await self._send_session_event(ws, "client.software_inventory", payload, pending, send_lock)
+            if not ack.get("accepted"):
+                logger.warning("Software inventory batch was rejected (%s)", ack.get("reason", "unknown"))
+                return False
+        if collected.complete:
+            self._save_inventory_digest(digest)
+        logger.info("Software inventory sent entries=%d batches=%d status=%s", len(collected.entries),
+                    len(batches), common["collection_status"])
+        return True
+
+    def _job_journal_path(self):
+        state_file = getattr(self.identity, "state_file", None)
+        return state_file.parent / "software-jobs.json" if state_file else None
+
+    def _load_job_journal(self) -> dict[str, dict]:
+        path = self._job_journal_path()
+        if path is None:
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            jobs = value.get("jobs", {}) if isinstance(value, dict) else {}
+            return jobs if isinstance(jobs, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            logging.getLogger("labguard_client").warning("Could not read software job journal")
+            return {}
+
+    def _save_job_journal(self, jobs: dict[str, dict]) -> None:
+        path = self._job_journal_path()
+        if path is None:
+            raise OSError("Persistent identity state is required for software jobs")
+        terminal = [(key, value) for key, value in jobs.items()
+                    if value.get("status") in {"SUCCEEDED", "FAILED"}]
+        active = [(key, value) for key, value in jobs.items()
+                  if value.get("status") not in {"SUCCEEDED", "FAILED"}]
+        bounded = dict((active + terminal[-200:])[-205:])
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_text(json.dumps({"version": 1, "jobs": bounded}, separators=(",", ":")), encoding="utf-8")
+        temp.replace(path)
+
+    async def _send_job_terminal(self, job_id: str, state: dict, ws, pending, send_lock):
+        success = state.get("status") == "SUCCEEDED"
+        event_type = "client.job.completed" if success else "client.job.failed"
+        payload = {"job_id": job_id, "result_code": state.get("result_code"),
+                   "result_summary": state.get("result_summary"),
+                   "error_message": state.get("error_message")}
+        try:
+            await self._send_session_event(ws, event_type, payload, pending, send_lock)
+        except Exception as exc:
+            logging.getLogger("labguard_client").warning(
+                "Could not report software job result (%s)", type(exc).__name__)
+
+    async def _run_software_job(self, payload: dict, ws, pending, send_lock):
+        logger = logging.getLogger("labguard_client")
+        try:
+            offer = SoftwareJobOffer.parse(payload)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Rejected invalid software job offer (%s)", type(exc).__name__)
+            return
+        jobs = self._load_job_journal()
+        current = jobs.get(offer.job_id)
+        expires = datetime.fromisoformat(offer.expires_at.replace("Z", "+00:00"))
+        if current is None and expires.astimezone(UTC) <= datetime.now(UTC):
+            logger.info("Ignored expired software job offer id=%s", offer.job_id)
+            return
+        if current and current.get("status") in {"SUCCEEDED", "FAILED"}:
+            await self._send_job_terminal(offer.job_id, current, ws, pending, send_lock)
+            return
+        if current and current.get("status") == "RUNNING":
+            interrupted = {"status": "FAILED", "result_code": "agent_restart_result_unknown",
+                           "result_summary": "Agent restarted while package operation was active; it was not repeated.",
+                           "error_message": "The previous operation may have completed; review inventory before retrying."}
+            jobs[offer.job_id] = interrupted
+            self._save_job_journal(jobs)
+            await self._send_job_terminal(offer.job_id, interrupted, ws, pending, send_lock)
+            return
+        if current is None:
+            current = {"status": "ACCEPTED"}
+            jobs[offer.job_id] = current
+            self._save_job_journal(jobs)
+        accepted = await self._send_session_event(ws, "client.job.accepted", {"job_id": offer.job_id},
+                                                  pending, send_lock)
+        if not accepted.get("accepted"):
+            if accepted.get("status") == "RUNNING":
+                interrupted = {"status": "FAILED", "result_code": "agent_restart_result_unknown",
+                    "result_summary": "Agent restarted while package operation was active; it was not repeated.",
+                    "error_message": "Review inventory before retrying."}
+                jobs[offer.job_id] = interrupted
+                self._save_job_journal(jobs)
+                await self._send_job_terminal(offer.job_id, interrupted, ws, pending, send_lock)
+            return
+        started = await self._send_session_event(ws, "client.job.started", {"job_id": offer.job_id},
+                                                 pending, send_lock)
+        if not started.get("accepted"):
+            return
+        jobs[offer.job_id] = {"status": "RUNNING"}
+        self._save_job_journal(jobs)
+
+        loop = asyncio.get_running_loop()
+        progress_queue: asyncio.Queue[str] = asyncio.Queue()
+        cancellation = threading.Event()
+        def report_progress(message: str):
+            loop.call_soon_threadsafe(progress_queue.put_nowait, message[:256])
+        operation = asyncio.create_task(asyncio.to_thread(execute_package_job, offer,
+            progress=report_progress, cancellation_event=cancellation))
+        percent = 5
+        try:
+            while not operation.done():
+                try:
+                    message = await asyncio.wait_for(progress_queue.get(), timeout=2)
+                except TimeoutError:
+                    continue
+                percent = min(90, percent + 10)
+                try:
+                    await self._send_session_event(ws, "client.job.progress", {
+                        "job_id": offer.job_id, "progress_percent": percent,
+                        "progress_message": message}, pending, send_lock)
+                except Exception as exc:
+                    logger.warning("Software job progress could not be sent (%s)", type(exc).__name__)
+            result = await operation
+        except asyncio.CancelledError:
+            cancellation.set()
+            try:
+                result = await asyncio.wait_for(operation, timeout=7)
+            except Exception:
+                result = None
+            if result is not None and result.cancelled:
+                failed = {"status": "FAILED", "result_code": "operation_cancelled",
+                          "result_summary": result.output, "error_message": "Agent stopped during package operation."}
+                jobs[offer.job_id] = failed
+                self._save_job_journal(jobs)
+            raise
+        except (PackageManagerUnavailable, UnsupportedExecutionContext, ValueError) as exc:
+            code = str(exc)[:64].lower()
+            if not re.fullmatch(r"[a-z0-9_:-]+", code):
+                code = "unsupported_execution_context"
+            failed = {"status": "FAILED", "result_code": code,
+                      "result_summary": "Package operation was not started.", "error_message": code}
+            jobs[offer.job_id] = failed
+            self._save_job_journal(jobs)
+            await self._send_job_terminal(offer.job_id, failed, ws, pending, send_lock)
+            return
+        except Exception as exc:
+            logger.exception("Software package operation failed unexpectedly (%s)", type(exc).__name__)
+            failed = {"status": "FAILED", "result_code": "package_operation_error",
+                      "result_summary": "Package operation failed unexpectedly.",
+                      "error_message": "The package manager operation could not be completed."}
+            jobs[offer.job_id] = failed
+            self._save_job_journal(jobs)
+            await self._send_job_terminal(offer.job_id, failed, ws, pending, send_lock)
+            return
+
+        try:
+            collected = await asyncio.to_thread(collect_software_inventory)
+            report_ok = await self._collect_and_send_software_inventory(
+                ws, pending, send_lock, request_id=None, force=True, collected=collected, job_id=offer.job_id)
+        except Exception as exc:
+            logger.exception("Post-operation software inventory failed (%s)", type(exc).__name__)
+            collected = None
+            report_ok = False
+        expected_source = "WINGET" if offer.package_manager == "WINGET" else "CHOCO"
+        found = bool(collected and any(item.get("package_id") and item["package_id"].casefold() == offer.package_id.casefold()
+                    and item.get("source") == expected_source for item in collected.entries)
+                    )
+        if result.timed_out:
+            result_code, error = "package_manager_timeout", "Package manager exceeded the configured operation timeout."
+            state = "FAILED"
+        elif result.cancelled:
+            result_code, error = "operation_cancelled", "Package operation was cancelled."
+            state = "FAILED"
+        elif result.returncode != 0:
+            result_code, error = f"package_manager_exit_{result.returncode}", "Package manager reported failure."
+            state = "FAILED"
+        elif not report_ok:
+            result_code, error = "inventory_report_failed", "Operation completed but refreshed inventory was not accepted by the server."
+            state = "FAILED"
+        elif collected is None:
+            result_code, error, state = "inventory_report_failed", "Could not collect post-operation inventory for verification.", "FAILED"
+        elif (offer.action == "INSTALL" and found) or (
+                offer.action == "UNINSTALL" and not found and collected.complete):
+            result_code, error, state = "verified_success", None, "SUCCEEDED"
+        else:
+            result_code, error, state = "inventory_verification_failed", "Package manager exited successfully, but the refreshed inventory did not confirm the requested result.", "FAILED"
+        final = {"status": state, "result_code": result_code,
+                 "result_summary": result.output or "Package manager operation finished.",
+                 "error_message": error}
+        jobs[offer.job_id] = final
+        self._save_job_journal(jobs)
+        await self._send_job_terminal(offer.job_id, final, ws, pending, send_lock)
 
     async def _wait_or_stop(self, stop: asyncio.Event, delay: float) -> bool:
         try:

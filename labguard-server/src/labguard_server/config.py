@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,11 @@ class Settings:
     telemetry_retention_days: int = 30
     telemetry_stale_after_seconds: int = 120
     telemetry_min_interval_seconds: float = 10.0
+    software_inventory_refresh_cooldown_seconds: int = 300
+    software_inventory_stale_after_seconds: int = 604800
+    software_inventory_retention_days: int = 90
+    chocolatey_source_url: str | None = None
+    software_job_max_runtime_seconds: int = 1800
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -38,6 +44,11 @@ class Settings:
             telemetry_retention_days=int(os.getenv("TELEMETRY_RETENTION_DAYS", "30")),
             telemetry_stale_after_seconds=int(os.getenv("TELEMETRY_STALE_AFTER_SECONDS", "120")),
             telemetry_min_interval_seconds=float(os.getenv("TELEMETRY_MIN_INTERVAL_SECONDS", "10")),
+            software_inventory_refresh_cooldown_seconds=int(os.getenv("SOFTWARE_INVENTORY_REFRESH_COOLDOWN_SECONDS", "300")),
+            software_inventory_stale_after_seconds=int(os.getenv("SOFTWARE_INVENTORY_STALE_AFTER_SECONDS", "604800")),
+            software_inventory_retention_days=int(os.getenv("SOFTWARE_INVENTORY_RETENTION_DAYS", "90")),
+            chocolatey_source_url=os.getenv("CHOCOLATEY_SOURCE_URL") or None,
+            software_job_max_runtime_seconds=int(os.getenv("SOFTWARE_JOB_MAX_RUNTIME_SECONDS", "1800")),
         )
 
     def validate(self) -> None:
@@ -54,3 +65,14 @@ class Settings:
         if not (1 <= self.telemetry_retention_days <= 3650 and 1 <= self.telemetry_stale_after_seconds <= 86400
                 and 1 <= self.telemetry_min_interval_seconds <= 3600):
             raise RuntimeError("Telemetry retention, stale threshold, and minimum interval are outside supported bounds")
+        if not (30 <= self.software_inventory_refresh_cooldown_seconds <= 86400
+                and 3600 <= self.software_inventory_stale_after_seconds <= 2_592_000
+                and 1 <= self.software_inventory_retention_days <= 3650):
+            raise RuntimeError("Software inventory cooldown, stale threshold, and retention are outside supported bounds")
+        if not 60 <= self.software_job_max_runtime_seconds <= 7200:
+            raise RuntimeError("Software job timeout must be between 60 and 7200 seconds")
+        if self.chocolatey_source_url:
+            parsed = urlsplit(self.chocolatey_source_url)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                    or parsed.query or parsed.fragment):
+                raise RuntimeError("CHOCOLATEY_SOURCE_URL must be an HTTPS URL without credentials, query, or fragment")

@@ -11,6 +11,11 @@ from labguard_server.models import now_utc
 from labguard_server.services import claim_device_ticket, record_agent_event
 from labguard_server.schemas import TelemetrySnapshotIn
 from labguard_server.telemetry import consume_rejected_telemetry_sequence, purge_expired_telemetry, record_telemetry
+from labguard_server.schemas import SoftwareInventoryBatchIn
+from labguard_server.software_inventory import record_software_inventory_batch
+from labguard_server.schemas import SoftwareJobEventIn
+from labguard_server.software_jobs import (dispatch_pending_software_jobs, record_software_job_event,
+                                           software_job_allows_inventory)
 
 router = APIRouter(prefix="/api/v1")
 MAX_FRAME_BYTES = 64 * 1024
@@ -52,6 +57,24 @@ def _persist_telemetry(factory, device_id, sequence, payload, minimum_interval, 
         return record_telemetry(db, device_id, sequence, payload, minimum_interval, retention_days)
 
 
+def _persist_software_inventory(factory, device_id, sequence, payload, cooldown, retention_days,
+                                manual_refresh_authorized=False, job_refresh_authorized=False):
+    with factory() as db:
+        return record_software_inventory_batch(db, device_id, sequence, payload, cooldown,
+                                               retention_days, manual_refresh_authorized,
+                                               job_refresh_authorized)
+
+
+def _software_job_allows_inventory(factory, device_id, job_id):
+    with factory() as db:
+        return software_job_allows_inventory(db, device_id, job_id)
+
+
+def _persist_software_job_event(factory, device_id, sequence, event_type, payload):
+    with factory() as db:
+        return record_software_job_event(db, device_id, sequence, event_type, payload)
+
+
 def _consume_invalid_telemetry(factory, device_id, sequence):
     with factory() as db:
         consume_rejected_telemetry_sequence(db, device_id, sequence)
@@ -73,9 +96,37 @@ async def _receive(websocket: WebSocket) -> ClientEnvelope:
 
 
 async def _send(websocket: WebSocket, device_id: UUID, event_type: str, payload: dict):
-    await websocket.send_json({"protocol": "labguard.agent", "schema_version": 1, "event_id": str(uuid4()),
-                               "device_id": str(device_id), "sequence": 0, "sent_at": now_utc().isoformat(),
-                               "type": event_type, "payload": payload})
+    message = {"protocol": "labguard.agent", "schema_version": 1, "event_id": str(uuid4()),
+               "device_id": str(device_id), "sequence": 0, "sent_at": now_utc().isoformat(),
+               "type": event_type, "payload": payload}
+    lock = websocket.app.state.active_device_send_locks.get(device_id)
+    if lock is None:
+        await websocket.send_json(message)
+    else:
+        async with lock:
+            await websocket.send_json(message)
+
+
+async def request_software_inventory_refresh(application, device_id: UUID, request_id: UUID) -> bool:
+    websocket = application.state.active_devices.get(device_id)
+    if websocket is None:
+        return False
+    try:
+        await _send(websocket, device_id, "server.software_inventory.refresh", {"request_id": str(request_id)})
+        return True
+    except (RuntimeError, WebSocketDisconnect):
+        return False
+
+
+async def send_software_job_offer(application, device_id: UUID, payload: dict) -> bool:
+    websocket = application.state.active_devices.get(device_id)
+    if websocket is None:
+        return False
+    try:
+        await _send(websocket, device_id, "server.software_job.offer", payload)
+        return True
+    except (RuntimeError, WebSocketDisconnect):
+        return False
 
 
 @router.websocket("/agent/session")
@@ -95,6 +146,7 @@ async def agent_session(websocket: WebSocket):
         except RuntimeError:
             pass
     active[device_id] = websocket
+    websocket.app.state.active_device_send_locks[device_id] = asyncio.Lock()
     websocket.app.state.admin_events.publish({"type": "device.connection", "device_id": str(device_id), "connected": True})
     try:
         try:
@@ -123,6 +175,7 @@ async def agent_session(websocket: WebSocket):
                     "delayed_after_seconds": settings.delayed_after_seconds,
                     "offline_after_seconds": settings.offline_after_seconds, "protocol_version": 1})
         await _send(websocket, device_id, "server.ack", {"event_type": "client.hello", "accepted": True, "server_time": now_utc().isoformat()})
+        await dispatch_pending_software_jobs(websocket.app, device_id)
 
         while True:
             raw = await websocket.receive_text()
@@ -134,7 +187,9 @@ async def agent_session(websocket: WebSocket):
             if event.device_id != device_id:
                 await websocket.close(code=4401, reason="authenticated_device_mismatch")
                 return
-            if event.type not in {"client.heartbeat", "client.telemetry"}:
+            if event.type not in {"client.heartbeat", "client.telemetry", "client.software_inventory",
+                                  "client.job.accepted", "client.job.started", "client.job.progress",
+                                  "client.job.completed", "client.job.failed"}:
                 await websocket.close(code=4400, reason="unsupported_event")
                 return
             if event.type == "client.telemetry":
@@ -171,6 +226,79 @@ async def agent_session(websocket: WebSocket):
                     "accepted": accepted, "server_received_at": received_at.isoformat() if accepted else None,
                     "reason": reason})
                 continue
+            if event.type == "client.software_inventory":
+                try:
+                    inventory = SoftwareInventoryBatchIn.model_validate(event.payload)
+                except ValidationError:
+                    await _send(websocket, device_id, "server.ack", {"event_id": str(event.event_id),
+                        "accepted": False, "reason": "invalid_software_inventory"})
+                    continue
+                manual_refresh_authorized = False
+                if inventory.request_id is not None:
+                    pending_refresh = websocket.app.state.software_refresh_requests.get(device_id)
+                    if (pending_refresh is None
+                            or pending_refresh["request_id"] != str(inventory.request_id)):
+                        await _send(websocket, device_id, "server.ack", {
+                            "event_id": str(event.event_id), "accepted": False,
+                            "reason": "invalid_refresh_request"})
+                        continue
+                    manual_refresh_authorized = True
+                job_refresh_authorized = False
+                if inventory.job_id is not None:
+                    job_refresh_authorized = await asyncio.to_thread(
+                        _software_job_allows_inventory, websocket.app.state.session_factory,
+                        device_id, inventory.job_id)
+                    if not job_refresh_authorized:
+                        await _send(websocket, device_id, "server.ack", {
+                            "event_id": str(event.event_id), "accepted": False,
+                            "reason": "invalid_job_inventory_request"})
+                        continue
+                try:
+                    result, completed = await asyncio.to_thread(_persist_software_inventory,
+                        websocket.app.state.session_factory, device_id, event.sequence, inventory,
+                        websocket.app.state.settings.software_inventory_refresh_cooldown_seconds,
+                        websocket.app.state.settings.software_inventory_retention_days,
+                        manual_refresh_authorized, job_refresh_authorized)
+                except HTTPException:
+                    await websocket.close(code=4401, reason="device_not_authorized_or_replayed")
+                    return
+                except Exception:
+                    logging.getLogger("labguard_server.websocket").exception("Failed storing software inventory")
+                    result, completed = {"accepted": False, "reason": "inventory_storage_error"}, False
+                if completed:
+                    if inventory.request_id is not None:
+                        pending_refresh = websocket.app.state.software_refresh_requests.get(device_id)
+                        if pending_refresh and pending_refresh["request_id"] == str(inventory.request_id):
+                            websocket.app.state.software_refresh_requests.pop(device_id, None)
+                    websocket.app.state.admin_events.publish({"type": "software.inventory",
+                        "device_id": str(device_id), "status": result.get("status"),
+                        "completed_at": now_utc().isoformat()})
+                await _send(websocket, device_id, "server.ack", {"event_id": str(event.event_id), **result})
+                continue
+            if event.type.startswith("client.job."):
+                try:
+                    job_event = SoftwareJobEventIn.model_validate(event.payload)
+                except ValidationError:
+                    await _send(websocket, device_id, "server.ack", {
+                        "event_id": str(event.event_id), "accepted": False, "reason": "invalid_job_event"})
+                    continue
+                try:
+                    result, terminal = await asyncio.to_thread(
+                        _persist_software_job_event, websocket.app.state.session_factory,
+                        device_id, event.sequence, event.type, job_event)
+                except HTTPException:
+                    await websocket.close(code=4401, reason="device_not_authorized_or_replayed")
+                    return
+                except Exception:
+                    logging.getLogger("labguard_server.websocket").exception("Failed storing software job event")
+                    result, terminal = {"accepted": False, "reason": "job_storage_error"}, False
+                if result.get("accepted"):
+                    websocket.app.state.admin_events.publish({"type": "software.job",
+                        "job_id": str(job_event.job_id), "device_id": str(device_id),
+                        "status": result.get("status")})
+                await _send(websocket, device_id, "server.ack", {
+                    "event_id": str(event.event_id), **result})
+                continue
             try:
                 received_at = _record(device_id, event.sequence, "client.heartbeat", websocket)
             except HTTPException:
@@ -187,6 +315,7 @@ async def agent_session(websocket: WebSocket):
     finally:
         if active.get(device_id) is websocket:
             active.pop(device_id, None)
+            websocket.app.state.active_device_send_locks.pop(device_id, None)
             websocket.app.state.admin_events.publish({"type": "device.connection", "device_id": str(device_id), "connected": False})
 
 

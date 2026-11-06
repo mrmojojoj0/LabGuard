@@ -17,6 +17,7 @@ import {
 import { useAuth } from "../auth/AuthProvider";
 import { canManageLabs } from "../auth/api";
 import { useToast } from "../../components/Toast";
+import { DeviceSoftware } from "../software/DeviceSoftware";
 
 const tabs = [
   "Overview",
@@ -145,7 +146,7 @@ export function DeviceDetailPage() {
                 key={item}
               >
                 {item}
-                {!["Overview"].includes(item) && (
+                {!["Overview", "Software"].includes(item) && (
                   <span className="ml-1 rounded bg-[var(--color-surface-subtle)] px-1 py-0.5 text-[7px] text-[var(--color-muted)]">
                     SOON
                   </span>
@@ -211,6 +212,8 @@ export function DeviceDetailPage() {
                 </div>
               </Panel>
             </div>
+          ) : tab === "Software" ? (
+            <DeviceSoftware id={id} />
           ) : (
             <ComingSoon
               title={`${tab} data isn’t available yet`}

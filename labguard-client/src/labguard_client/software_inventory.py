@@ -1,0 +1,268 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+import hashlib
+import json
+import logging
+import os
+import platform
+import re
+import shutil
+import subprocess
+from typing import Any
+
+REGISTRY_PATH = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+MAX_ENTRIES = 10_000
+MAX_ERRORS = 20
+MAX_BATCH_BYTES = 48 * 1024
+
+
+@dataclass
+class SoftwareInventory:
+    entries: list[dict[str, str | None]]
+    errors: list[str]
+    detected_package_managers: list[str]
+
+    @property
+    def complete(self) -> bool:
+        return not self.errors
+
+
+def inventory_digest(entries: list[dict[str, Any]]) -> str:
+    canonical = json.dumps(sorted(entries, key=lambda item: item["entry_key"]),
+                           sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _clean(value: Any, limit: int) -> str | None:
+    if not isinstance(value, (str, int, float)):
+        return None
+    text = str(value).strip()
+    return text[:limit] or None
+
+
+def _make_entry(*, name: str, version: str | None, publisher: str | None,
+                architecture: str | None, install_date: str | None,
+                install_location: str | None, package_id: str | None,
+                source: str, scope: str) -> dict[str, str | None]:
+    name = name.strip()[:256]
+    normalized = "\x1f".join((source, scope, (package_id or name).casefold(),
+                             (publisher or "").casefold(), (architecture or "UNKNOWN").casefold(),
+                             (install_location or "").casefold()))
+    return {
+        "entry_key": hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest(),
+        "name": name,
+        "version": _clean(version, 128),
+        "publisher": _clean(publisher, 256),
+        "architecture": _clean(architecture, 32) or "UNKNOWN",
+        "install_date": install_date,
+        "install_location": _clean(install_location, 1024),
+        "package_id": _clean(package_id, 256),
+        "source": source,
+        "installation_scope": scope,
+    }
+
+
+def _registry_entries(winreg, errors: list[str]) -> list[dict[str, str | None]]:
+    result: dict[str, dict[str, str | None]] = {}
+    is_64_bit = platform.machine().lower() in {"amd64", "x86_64", "arm64", "aarch64"}
+    read = winreg.KEY_READ
+    views = [(getattr(winreg, "KEY_WOW64_64KEY", 0), "x64"),
+             (getattr(winreg, "KEY_WOW64_32KEY", 0), "x86")] if is_64_bit else [(0, platform.machine() or "UNKNOWN")]
+    roots: list[tuple[Any, str, str]] = [
+        (winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, "MACHINE"),
+        (winreg.HKEY_CURRENT_USER, REGISTRY_PATH, "USER"),
+    ]
+    # LocalSystem's HKCU is its own profile. Include only loaded ordinary user hives.
+    try:
+        with winreg.OpenKey(winreg.HKEY_USERS, "") as users:
+            index = 0
+            while index < 4096:
+                try:
+                    sid = winreg.EnumKey(users, index)
+                except OSError:
+                    break
+                index += 1
+                if re.fullmatch(r"S-1-5-21-(?:\d+-){2,}\d+", sid):
+                    roots.append((winreg.HKEY_USERS, sid + "\\" + REGISTRY_PATH, "USER"))
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 5:
+            errors.append("registry_access_denied:loaded_user_hives")
+
+    for root, path, scope in roots:
+        for view, architecture in views:
+            try:
+                with winreg.OpenKey(root, path, 0, read | view) as uninstall:
+                    index = 0
+                    while index < MAX_ENTRIES:
+                        try:
+                            subkey = winreg.EnumKey(uninstall, index)
+                        except OSError:
+                            break
+                        index += 1
+                        try:
+                            with winreg.OpenKey(uninstall, subkey, 0, read) as app:
+                                def value(name: str):
+                                    try:
+                                        return winreg.QueryValueEx(app, name)[0]
+                                    except OSError as exc:
+                                        if getattr(exc, "winerror", None) == 5:
+                                            errors.append("registry_value_access_denied")
+                                        return None
+
+                                display_name = _clean(value("DisplayName"), 256)
+                                if not display_name or value("SystemComponent") == 1:
+                                    continue
+                                raw_date = _clean(value("InstallDate"), 16)
+                                install_date = None
+                                if raw_date and re.fullmatch(r"\d{8}", raw_date):
+                                    try:
+                                        install_date = datetime.strptime(raw_date, "%Y%m%d").date().isoformat()
+                                    except ValueError:
+                                        pass
+                                item = _make_entry(
+                                    name=display_name, version=_clean(value("DisplayVersion"), 128),
+                                    publisher=_clean(value("Publisher"), 256), architecture=architecture,
+                                    install_date=install_date, install_location=_clean(value("InstallLocation"), 1024),
+                                    package_id=_clean(value("PackageId") or value("ProductId"), 256),
+                                    source="WINDOWS_REGISTRY", scope=scope,
+                                )
+                                result[item["entry_key"]] = item
+                        except OSError as exc:
+                            if getattr(exc, "winerror", None) == 5:
+                                errors.append("registry_entry_access_denied")
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 5:
+                    errors.append("registry_access_denied:uninstall_key")
+    return list(result.values())
+
+
+def _run_fixed_command(command: list[str], timeout: float = 20.0) -> str:
+    kwargs: dict[str, Any] = {"capture_output": True, "text": True, "timeout": timeout,
+                              "check": False, "shell": False, "encoding": "utf-8", "errors": "replace"}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    completed = subprocess.run(command, **kwargs)
+    if completed.returncode != 0:
+        raise RuntimeError("package_manager_query_failed")
+    return completed.stdout[:2_000_000]
+
+
+def _winget_entries(which, run, errors):
+    executable = which("winget")
+    if not executable:
+        return [], False
+    try:
+        output = run([executable, "list", "--disable-interactivity", "--accept-source-agreements", "--count", "2000"])
+        lines = output.splitlines()
+        header_index = next((i for i, line in enumerate(lines) if re.search(r"\bID\b", line, re.I)
+                             and re.search(r"\bVersion\b", line, re.I)), None)
+        if header_index is None:
+            raise ValueError("winget_table_unavailable")
+        header = lines[header_index]
+        id_start = re.search(r"\bID\b", header, re.I).start()
+        version_match = re.search(r"\bVersion\b", header, re.I)
+        later = [match.start() for label in ("Available", "Source")
+                 if (match := re.search(rf"\b{label}\b", header, re.I)) and match.start() > version_match.start()]
+        version_end = min(later) if later else len(header)
+        entries = []
+        for line in lines[header_index + 1:]:
+            if not line.strip() or set(line.strip()) == {"-"}:
+                continue
+            package_id = line[id_start:version_match.start()].strip().split()[0:1]
+            version = line[version_match.start():version_end].strip().split()[0:1]
+            name = line[:id_start].strip()
+            if not name or not package_id:
+                continue
+            entries.append(_make_entry(name=name, version=version[0] if version else None, publisher=None,
+                architecture="UNKNOWN", install_date=None, install_location=None, package_id=package_id[0],
+                source="WINGET", scope="UNKNOWN"))
+        return entries[:2000], True
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+        errors.append("winget_inventory_unavailable")
+        return [], True
+
+
+def _chocolatey_entries(which, run, errors):
+    executable = which("choco")
+    if not executable:
+        return [], False
+    try:
+        # Chocolatey v2 lists local packages; --local-only keeps v1 from querying sources.
+        output = run([executable, "list", "--limit-output", "--local-only", "--no-progress"])
+        entries = []
+        for line in output.splitlines():
+            if "|" not in line:
+                continue
+            package_id, version = line.split("|", 1)
+            package_id, version = package_id.strip(), version.strip()
+            if not package_id or not version or len(package_id) > 256 or len(version) > 128:
+                continue
+            entries.append(_make_entry(name=package_id, version=version, publisher=None, architecture="UNKNOWN",
+                install_date=None, install_location=None, package_id=package_id, source="CHOCO", scope="MACHINE"))
+        return entries[:2000], True
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        errors.append("chocolatey_inventory_unavailable")
+        return [], True
+
+
+def collect_software_inventory(*, winreg_module=None, which=shutil.which, run=_run_fixed_command,
+                               windows: bool | None = None) -> SoftwareInventory:
+    """Read Windows uninstall metadata and optional local package-manager listings only."""
+    errors: list[str] = []
+    detected: list[str] = []
+    if windows is None:
+        windows = platform.system() == "Windows"
+    entries: list[dict[str, str | None]] = []
+    if windows:
+        if winreg_module is None:
+            try:
+                import winreg as winreg_module
+            except ImportError:
+                errors.append("registry_unavailable")
+        if winreg_module is not None:
+            entries.extend(_registry_entries(winreg_module, errors))
+        winget, has_winget = _winget_entries(which, run, errors)
+        choco, has_choco = _chocolatey_entries(which, run, errors)
+        if has_winget:
+            detected.append("WINGET")
+        if has_choco:
+            detected.append("CHOCO")
+        entries.extend(winget)
+        entries.extend(choco)
+    else:
+        errors.append("windows_software_inventory_unavailable")
+    unique = {item["entry_key"]: item for item in entries}
+    if len(unique) > MAX_ENTRIES:
+        errors.append("inventory_entry_limit_exceeded")
+    bounded = list(unique.values())[:MAX_ENTRIES]
+    if len(errors) > MAX_ERRORS:
+        errors = errors[:MAX_ERRORS]
+    logging.getLogger("labguard_client").info(
+        "Software inventory collected entries=%d errors=%d managers=%s",
+        len(bounded), len(errors), ",".join(detected) or "none")
+    return SoftwareInventory(bounded, errors, detected)
+
+
+def batch_entries(entries: list[dict[str, str | None]], payload_base: dict[str, Any],
+                  max_bytes: int = MAX_BATCH_BYTES) -> list[list[dict[str, str | None]]]:
+    """Partition inventory into protocol-safe batches, including payload metadata overhead."""
+    batches: list[list[dict[str, str | None]]] = []
+    current: list[dict[str, str | None]] = []
+    for entry in entries:
+        candidate = current + [entry]
+        payload = {**payload_base, "batch_index": 255, "batch_count": 256, "entries": candidate}
+        if current and (len(candidate) > 100 or len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) > max_bytes):
+            batches.append(current)
+            current = [entry]
+        else:
+            current = candidate
+        if len(json.dumps({**payload_base, "batch_index": 255, "batch_count": 256,
+                           "entries": current}, separators=(",", ":")).encode("utf-8")) > max_bytes:
+            raise ValueError("A software inventory entry exceeds the safe batch size")
+    if current or not batches:
+        batches.append(current)
+    if len(batches) > 256:
+        raise ValueError("Software inventory exceeds the supported batch count")
+    return batches

@@ -89,6 +89,119 @@ export interface TelemetrySummary {
   average_memory_percent: number | null;
   average_disk_percent: number | null;
 }
+export interface SoftwareItem {
+  id: string;
+  device_id: string;
+  software_key: string;
+  entry_key: string;
+  name: string;
+  version: string | null;
+  publisher: string | null;
+  architecture: string;
+  install_date: string | null;
+  install_location: string | null;
+  package_id: string | null;
+  source: "WINDOWS_REGISTRY" | "WINGET" | "CHOCO";
+  installation_scope: "MACHINE" | "USER" | "UNKNOWN";
+  first_seen_at: string;
+  last_seen_at: string;
+  device_name?: string | null;
+  hostname?: string | null;
+}
+export interface SoftwareCollectionStatus {
+  collection_id?: string;
+  request_id?: string | null;
+  status: "NEVER" | "IN_PROGRESS" | "COMPLETE" | "PARTIAL" | "FAILED" | "UNCHANGED";
+  started_at: string | null;
+  completed_at: string | null;
+  last_successful_at: string | null;
+  discovered_count: number;
+  errors: string[];
+  stale?: boolean;
+}
+export interface SoftwareSummary {
+  unique_applications: number;
+  total_installations: number;
+  devices_with_successful_inventory: number;
+  stale_devices: number;
+  never_reported_devices: number;
+  partial_devices: number;
+  collecting_devices: number;
+  most_common: Array<{
+    software_key: string;
+    name: string;
+    publisher: string | null;
+    installation_count: number;
+    device_count: number;
+    source: string;
+  }>;
+}
+export interface SoftwarePageResult {
+  items: SoftwareItem[];
+  total: number;
+  offset: number;
+  limit: number;
+  status?: SoftwareCollectionStatus;
+}
+export interface SoftwareAggregate {
+  software_key: string;
+  name: string;
+  publisher: string | null;
+  installation_count: number;
+  device_count: number;
+  source: string;
+}
+export interface SoftwareAggregatePage {
+  items: SoftwareAggregate[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+export interface SoftwareCatalogPackage {
+  id: string;
+  display_name: string;
+  package_id: string;
+  package_manager: "WINGET" | "CHOCO";
+  publisher: string | null;
+  description: string | null;
+  version_policy: "LATEST" | "PINNED" | "SELECTABLE";
+  approved_version: string | null;
+  supported_scopes: Array<"MACHINE" | "USER">;
+  source: string;
+  approved: boolean;
+  created_at: string;
+  approved_at: string | null;
+}
+export interface SoftwareJob {
+  id: string;
+  device_id: string;
+  catalog_package_id: string | null;
+  requested_by: string | null;
+  action: "INSTALL" | "UNINSTALL";
+  package_id: string;
+  package_manager: "WINGET" | "CHOCO";
+  requested_version: string | null;
+  installation_scope: "MACHINE" | "USER";
+  source: string;
+  status: "PENDING" | "DISPATCHED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "EXPIRED";
+  progress_percent: number;
+  progress_message: string | null;
+  result_code: string | null;
+  result_summary: string | null;
+  error_message: string | null;
+  created_at: string;
+  expires_at: string;
+  dispatched_at: string | null;
+  accepted_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+export interface SoftwareJobsPage {
+  items: SoftwareJob[];
+  total: number;
+  offset: number;
+  limit: number;
+}
 export interface Room {
   id: string;
   name: string;

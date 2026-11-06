@@ -1,8 +1,11 @@
 from datetime import datetime
 from ipaddress import IPv4Address, IPv6Address
+from datetime import date
+import re
+from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, StrictInt, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 
 
 class LoginRequest(BaseModel):
@@ -183,4 +186,114 @@ class TelemetrySnapshotIn(BaseModel):
         if self.collected_at.tzinfo is None or self.boot_time.tzinfo is None:
             raise ValueError("telemetry timestamps must include a timezone")
         return self
+
+
+class SoftwareInventoryEntryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    entry_key: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    name: StrictStr = Field(min_length=1, max_length=256)
+    version: StrictStr | None = Field(default=None, max_length=128)
+    publisher: StrictStr | None = Field(default=None, max_length=256)
+    architecture: StrictStr = Field(min_length=1, max_length=32)
+    install_date: StrictStr | None = Field(default=None, max_length=10, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    install_location: StrictStr | None = Field(default=None, max_length=1024)
+    package_id: StrictStr | None = Field(default=None, max_length=256)
+    source: Literal["WINDOWS_REGISTRY", "WINGET", "CHOCO"]
+    installation_scope: Literal["MACHINE", "USER", "UNKNOWN"]
+
+    @field_validator("install_date")
+    @classmethod
+    def valid_install_date(cls, value):
+        if value is not None:
+            date.fromisoformat(value)
+        return value
+
+
+class SoftwareInventoryBatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    collection_id: UUID
+    request_id: UUID | None = None
+    job_id: UUID | None = None
+    inventory_version: StrictInt = Field(ge=1, le=1)
+    started_at: datetime
+    batch_index: StrictInt = Field(ge=0, le=255)
+    batch_count: StrictInt = Field(ge=1, le=256)
+    collection_status: Literal["COMPLETE", "PARTIAL"]
+    inventory_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    unchanged: StrictBool = False
+    errors: list[StrictStr] = Field(default_factory=list, max_length=20)
+    entries: list[SoftwareInventoryEntryIn] = Field(default_factory=list, max_length=100)
+
+    @field_validator("errors")
+    @classmethod
+    def safe_error_codes(cls, values):
+        if any(len(value) > 160 or not re.fullmatch(r"[a-z0-9_:-]+", value) for value in values):
+            raise ValueError("inventory errors must be bounded diagnostic codes")
+        return values
+
+    @model_validator(mode="after")
+    def batch_metadata_is_consistent(self):
+        if self.started_at.tzinfo is None:
+            raise ValueError("inventory start time must include a timezone")
+        if self.batch_index >= self.batch_count:
+            raise ValueError("batch index must be less than batch count")
+        keys = [entry.entry_key for entry in self.entries]
+        if len(keys) != len(set(keys)):
+            raise ValueError("a batch cannot contain duplicate entries")
+        if self.unchanged and (self.batch_count != 1 or self.batch_index != 0 or self.entries or self.errors
+                               or self.job_id is not None or self.collection_status != "COMPLETE"):
+            raise ValueError("unchanged inventory must be one empty complete batch")
+        return self
+
+
+class SoftwareCatalogPackageCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    display_name: StrictStr = Field(min_length=1, max_length=256)
+    package_id: StrictStr = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
+    package_manager: Literal["WINGET", "CHOCO"]
+    publisher: StrictStr | None = Field(default=None, max_length=256)
+    description: StrictStr | None = Field(default=None, max_length=1000)
+    version_policy: Literal["LATEST", "PINNED", "SELECTABLE"] = "LATEST"
+    approved_version: StrictStr | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+    supported_scopes: list[Literal["MACHINE", "USER"]] = Field(min_length=1, max_length=2)
+
+    @model_validator(mode="after")
+    def validate_package_policy(self):
+        if len(self.supported_scopes) != len(set(self.supported_scopes)):
+            raise ValueError("supported scopes must be unique")
+        if self.version_policy == "PINNED" and not self.approved_version:
+            raise ValueError("pinned packages require an approved version")
+        if self.version_policy != "PINNED" and self.approved_version is not None:
+            raise ValueError("only pinned packages can set an approved version")
+        if self.package_manager == "CHOCO" and self.supported_scopes != ["MACHINE"]:
+            raise ValueError("Chocolatey supports machine scope only in this release")
+        return self
+
+
+class SoftwareJobCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["INSTALL", "UNINSTALL"]
+    catalog_package_id: UUID
+    installation_scope: Literal["MACHINE", "USER"] = "MACHINE"
+    version: StrictStr | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+    inventory_item_id: UUID | None = None
+    expires_in_seconds: StrictInt = Field(default=1800, ge=60, le=86400)
+
+    @model_validator(mode="after")
+    def action_parameters_match(self):
+        if self.action == "INSTALL" and self.inventory_item_id is not None:
+            raise ValueError("install jobs cannot specify an inventory item")
+        if self.action == "UNINSTALL" and (self.inventory_item_id is None or self.version is not None):
+            raise ValueError("uninstall jobs require an inventory item and do not accept a version")
+        return self
+
+
+class SoftwareJobEventIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    job_id: UUID
+    progress_percent: StrictInt | None = Field(default=None, ge=0, le=100)
+    progress_message: StrictStr | None = Field(default=None, max_length=256)
+    result_code: StrictStr | None = Field(default=None, max_length=64, pattern=r"^[a-z0-9_:-]+$")
+    result_summary: StrictStr | None = Field(default=None, max_length=1000)
+    error_message: StrictStr | None = Field(default=None, max_length=500)
 

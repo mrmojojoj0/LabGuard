@@ -1,21 +1,28 @@
-from uuid import UUID
+from uuid import UUID, uuid4
 from time import monotonic
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from labguard_server.db import get_db
-from labguard_server.models import AuditEvent, Device, DeviceAuthChallenge, DeviceCredential, DevicePosition, DeviceStatus, DeviceStatusEvent, Room, now_utc
+from labguard_server.models import (AuditEvent, Device, DeviceAuthChallenge, DeviceCredential, DevicePosition,
+                                    DeviceStatus, DeviceStatusEvent, Room, SoftwareCatalogPackage, SoftwareJob, now_utc)
 from labguard_server.schemas import (DeviceApproval, DeviceChallengeRequest, DeviceOut, DeviceTicketRequest, EnrollmentCodeOut, EnrollmentRequestIn,
-                                     LayoutOut, LoginRequest, RoomCreate, RoomLayout, RoomOut, RoomPatch)
+                                     LayoutOut, LoginRequest, RoomCreate, RoomLayout, RoomOut, RoomPatch,
+                                     SoftwareCatalogPackageCreate, SoftwareJobCreate)
 from labguard_server.security import csrf_protected, digest, require_role
 from labguard_server.services import (approve_device, audit, authenticate, create_enrollment_code, create_room,
                                       create_device_challenge, delete_device, issue_device_ticket, save_layout, submit_enrollment,
                                       update_room)
 from labguard_server.telemetry import latest_telemetry, telemetry_history, telemetry_summary
+from labguard_server.software_inventory import (device_software_items, global_software_list, inventory_status,
+                                                software_installations, software_summary)
+from labguard_server.websocket import request_software_inventory_refresh
+from labguard_server.software_jobs import (catalog_out, create_software_job, dispatch_software_job,
+                                           job_out)
 
 router = APIRouter(prefix="/api/v1")
 _login_failures: dict[str, list[float]] = {}
@@ -213,6 +220,204 @@ def list_devices(_admin=Depends(require_role("VIEWER")), db: Session = Depends(g
     return db.scalars(select(Device).order_by(Device.created_at)).all()
 
 
+@router.get("/devices/{device_id}/software")
+def device_software(device_id: UUID, request: Request, search: str | None = Query(default=None, max_length=128),
+                    publisher: str | None = Query(default=None, max_length=128),
+                    source: str | None = Query(default=None, pattern=r"^(WINDOWS_REGISTRY|WINGET|CHOCO)$"),
+                    installation_scope: str | None = Query(default=None, pattern=r"^(MACHINE|USER|UNKNOWN)$"),
+                    version: str | None = Query(default=None, max_length=128),
+                    offset: int = Query(default=0, ge=0, le=1_000_000), limit: int = Query(default=100, ge=1, le=200),
+                    _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    if db.get(Device, device_id) is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Device not found"})
+    items, total = device_software_items(db, device_id, search=search, publisher=publisher, source=source,
+        installation_scope=installation_scope, version=version, offset=offset, limit=limit)
+    return {"device_id": str(device_id), "collection": inventory_status(db, device_id,
+            request.app.state.settings.software_inventory_stale_after_seconds),
+            "items": items, "total": total, "offset": offset, "limit": limit}
+
+
+@router.post("/devices/{device_id}/software/refresh", status_code=202)
+async def refresh_device_software(device_id: UUID, request: Request,
+                                  admin=Depends(require_role("LAB_ADMIN", csrf=True)), db: Session = Depends(get_db)):
+    if db.get(Device, device_id) is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Device not found"})
+    pending_refresh = request.app.state.software_refresh_requests.get(device_id)
+    now = monotonic()
+    cooldown = request.app.state.settings.software_inventory_refresh_cooldown_seconds
+    if pending_refresh is not None and now - pending_refresh["requested_at"] < cooldown:
+        retry = max(1, int(cooldown - (now - pending_refresh["requested_at"])))
+        raise HTTPException(status_code=429, detail={"code": "refresh_rate_limited", "message": "Inventory refresh is on cooldown"},
+                            headers={"Retry-After": str(retry)})
+    request_id = uuid4()
+    request.app.state.software_refresh_requests[device_id] = {
+        "requested_at": now, "request_id": str(request_id),
+    }
+    if not await request_software_inventory_refresh(request.app, device_id, request_id):
+        request.app.state.software_refresh_requests.pop(device_id, None)
+        raise HTTPException(status_code=409, detail={"code": "device_offline", "message": "Device is offline or unavailable"})
+    audit(db, admin.id, "software.inventory_refresh", "device", str(device_id), {"request_id": str(request_id)})
+    db.commit()
+    return {"device_id": str(device_id), "request_id": str(request_id), "status": "requested"}
+
+
+@router.get("/software")
+def list_software(search: str | None = Query(default=None, max_length=128), device_id: UUID | None = None,
+                  publisher: str | None = Query(default=None, max_length=128),
+                  source: str | None = Query(default=None, pattern=r"^(WINDOWS_REGISTRY|WINGET|CHOCO)$"),
+                  installation_scope: str | None = Query(default=None, pattern=r"^(MACHINE|USER|UNKNOWN)$"),
+                  version: str | None = Query(default=None, max_length=128),
+                  offset: int = Query(default=0, ge=0, le=1_000_000), limit: int = Query(default=50, ge=1, le=200),
+                  _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    items, total = global_software_list(db, search=search, device_id=device_id, publisher=publisher,
+        source=source, installation_scope=installation_scope, version=version, offset=offset, limit=limit)
+    return {"items": items, "total": total, "offset": offset, "limit": limit}
+
+
+@router.get("/software/summary")
+def software_inventory_overview(request: Request, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    return software_summary(db, request.app.state.settings.software_inventory_stale_after_seconds)
+
+
+@router.get("/software/catalog")
+def list_software_catalog(search: str | None = Query(default=None, max_length=128),
+                          package_manager: str | None = Query(default=None, pattern=r"^(WINGET|CHOCO)$"),
+                          approved: bool | None = None, admin=Depends(require_role("VIEWER")),
+                          db: Session = Depends(get_db)):
+    query = select(SoftwareCatalogPackage)
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.where(func.lower(SoftwareCatalogPackage.display_name).like(term.lower())
+                            | func.lower(SoftwareCatalogPackage.package_id).like(term.lower())
+                            | func.lower(SoftwareCatalogPackage.publisher).like(term.lower()))
+    if package_manager:
+        query = query.where(SoftwareCatalogPackage.package_manager == package_manager)
+    if admin.role != "SUPER_ADMIN":
+        query = query.where(SoftwareCatalogPackage.approved.is_(True))
+    elif approved is not None:
+        query = query.where(SoftwareCatalogPackage.approved.is_(approved))
+    return [catalog_out(row) for row in db.scalars(query.order_by(SoftwareCatalogPackage.display_name)).all()]
+
+
+@router.post("/software/catalog", status_code=201)
+def create_software_catalog_package(body: SoftwareCatalogPackageCreate,
+                                    request: Request,
+                                    admin=Depends(require_role("SUPER_ADMIN", csrf=True)),
+                                    db: Session = Depends(get_db)):
+    if body.package_manager == "CHOCO" and not request.app.state.settings.chocolatey_source_url:
+        raise HTTPException(status_code=503, detail={"code": "chocolatey_source_unconfigured", "message": "Configure CHOCOLATEY_SOURCE_URL before adding Chocolatey packages"})
+    existing = db.scalar(select(SoftwareCatalogPackage).where(
+        SoftwareCatalogPackage.package_manager == body.package_manager,
+        func.lower(SoftwareCatalogPackage.package_id) == body.package_id.lower()))
+    if existing is not None:
+        raise HTTPException(status_code=409, detail={"code": "package_exists", "message": "This package is already in the catalog"})
+    package = SoftwareCatalogPackage(**body.model_dump(), source=(
+        "WINGET_COMMUNITY" if body.package_manager == "WINGET" else "CHOCO_CONFIGURED"),
+        approved=False, created_by=admin.id)
+    db.add(package)
+    audit(db, admin.id, "software.catalog.create", "software_package", str(package.id),
+          {"package_id": package.package_id, "package_manager": package.package_manager})
+    db.commit()
+    db.refresh(package)
+    return catalog_out(package)
+
+
+@router.post("/software/catalog/{package_id}/approve")
+def approve_software_catalog_package(package_id: UUID, request: Request,
+                                     admin=Depends(require_role("SUPER_ADMIN", csrf=True)),
+                                     db: Session = Depends(get_db)):
+    package = db.scalar(select(SoftwareCatalogPackage).where(
+        SoftwareCatalogPackage.id == package_id).with_for_update())
+    if package is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Catalog package not found"})
+    if package.package_manager == "CHOCO" and not package.approved and not request.app.state.settings.chocolatey_source_url:
+        raise HTTPException(status_code=503, detail={"code": "chocolatey_source_unconfigured", "message": "Configure CHOCOLATEY_SOURCE_URL before approving Chocolatey packages"})
+    if not package.approved:
+        package.approved = True
+        package.approved_at = now_utc()
+        audit(db, admin.id, "software.catalog.approve", "software_package", str(package.id),
+              {"package_id": package.package_id, "package_manager": package.package_manager})
+        db.commit()
+    return catalog_out(package)
+
+
+@router.post("/software/catalog/{package_id}/revoke")
+def revoke_software_catalog_package(package_id: UUID, admin=Depends(require_role("SUPER_ADMIN", csrf=True)),
+                                    db: Session = Depends(get_db)):
+    package = db.scalar(select(SoftwareCatalogPackage).where(
+        SoftwareCatalogPackage.id == package_id).with_for_update())
+    if package is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Catalog package not found"})
+    if package.approved:
+        package.approved = False
+        audit(db, admin.id, "software.catalog.revoke", "software_package", str(package.id),
+              {"package_id": package.package_id, "package_manager": package.package_manager})
+        db.commit()
+    return catalog_out(package)
+
+
+@router.post("/devices/{device_id}/software/jobs", status_code=202)
+async def create_device_software_job(device_id: UUID, body: SoftwareJobCreate, request: Request,
+                                     admin=Depends(require_role("LAB_ADMIN", csrf=True)),
+                                     db: Session = Depends(get_db)):
+    job = create_software_job(db, device_id, admin.id, body,
+        choco_source_configured=bool(request.app.state.settings.chocolatey_source_url))
+    audit(db, admin.id, "software.job_requested", "software_job", str(job.id), {
+        "device_id": str(device_id), "action": job.action, "package_id": job.package_id,
+        "package_manager": job.package_manager,
+    })
+    db.commit()
+    await dispatch_software_job(request.app, job.id)
+    refreshed = db.get(SoftwareJob, job.id)
+    request.app.state.admin_events.publish({"type": "software.job", "job_id": str(job.id),
+        "device_id": str(device_id), "status": refreshed.status})
+    return job_out(refreshed)
+
+
+@router.get("/software/jobs")
+def list_software_jobs(status: str | None = Query(default=None, pattern=r"^(PENDING|DISPATCHED|RUNNING|SUCCEEDED|FAILED|CANCELLED|EXPIRED)$"),
+                       device_id: UUID | None = None, offset: int = Query(default=0, ge=0, le=1_000_000),
+                       limit: int = Query(default=50, ge=1, le=200),
+                       _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    query = select(SoftwareJob)
+    if status:
+        query = query.where(SoftwareJob.status == status)
+    if device_id:
+        query = query.where(SoftwareJob.device_id == device_id)
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    jobs = db.scalars(query.order_by(SoftwareJob.created_at.desc()).offset(offset).limit(limit)).all()
+    return {"items": [job_out(job) for job in jobs], "total": total, "offset": offset, "limit": limit}
+
+
+@router.get("/devices/{device_id}/software/jobs")
+def list_device_software_jobs(device_id: UUID, offset: int = Query(default=0, ge=0, le=1_000_000),
+                              limit: int = Query(default=50, ge=1, le=200),
+                              _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    if db.get(Device, device_id) is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Device not found"})
+    query = select(SoftwareJob).where(SoftwareJob.device_id == device_id)
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    jobs = db.scalars(query.order_by(SoftwareJob.created_at.desc()).offset(offset).limit(limit)).all()
+    return {"items": [job_out(job) for job in jobs], "total": total, "offset": offset, "limit": limit}
+
+
+@router.get("/software/jobs/{job_id}")
+def get_software_job(job_id: UUID, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    job = db.get(SoftwareJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Software job not found"})
+    return job_out(job)
+
+
+@router.get("/software/{software_key}/installations")
+def list_software_installations(software_key: str = Path(pattern=r"^[0-9a-f]{64}$"),
+                                offset: int = Query(default=0, ge=0, le=1_000_000),
+                                limit: int = Query(default=200, ge=1, le=500),
+                                _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    items, total = software_installations(db, software_key, offset=offset, limit=limit)
+    return {"items": items, "total": total, "offset": offset, "limit": limit}
+
+
 @router.delete("/devices/{device_id}", status_code=204)
 async def remove_device(device_id: UUID, request: Request,
                         admin=Depends(require_role("LAB_ADMIN", csrf=True)), db: Session = Depends(get_db)):
@@ -224,6 +429,7 @@ async def remove_device(device_id: UUID, request: Request,
     if active is not None:
         if request.app.state.active_devices.get(device_id) is active:
             request.app.state.active_devices.pop(device_id, None)
+            request.app.state.active_device_send_locks.pop(device_id, None)
         try:
             await active.close(code=4404, reason="device_deleted")
         except RuntimeError:

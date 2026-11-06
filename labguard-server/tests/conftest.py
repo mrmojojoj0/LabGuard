@@ -12,12 +12,18 @@ from fastapi.testclient import TestClient
 
 from labguard_server.config import Settings
 from labguard_server.main import create_app
+from labguard_server import api as api_module
 from labguard_server.models import Administrator
 from labguard_server.security import hash_password
 
 
 @pytest.fixture
 def client(tmp_path: Path, monkeypatch):
+    # Rate-limit buckets are module-level for this single-process MVP; reset them
+    # between isolated TestClient applications so suite order cannot exhaust them.
+    api_module._login_failures.clear()
+    api_module._enrollment_attempts.clear()
+    api_module._device_auth_attempts.clear()
     db_path = tmp_path / "test.sqlite"
     database_url = f"sqlite:///{db_path.as_posix()}"
     monkeypatch.setenv("DATABASE_URL", database_url)

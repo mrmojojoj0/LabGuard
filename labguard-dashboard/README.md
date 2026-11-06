@@ -45,6 +45,9 @@ npm run preview
 - `GET /enrollment/requests`, approval/rejection endpoints, and `POST /enrollment-codes` for Lab Admin and above.
 - `GET /audit-events?limit=25` for audit activity.
 
-The dashboard receives authenticated status and connection events from the separate administrator Server-Sent Events endpoint `/api/v1/admin/events`; the device WebSocket at `/api/v1/agent/session` remains restricted to device tickets. EventSource reconnects after a dropped stream. Room assignments can be read and saved through `/api/v1/rooms/{id}/layout`; the dashboard provides an editor for approved devices and grid positions.
+The dashboard receives authenticated status and connection events from the separate administrator Server-Sent Events endpoint `/api/v1/admin/events`; the device WebSocket at `/api/v1/agent/session` remains restricted to device tickets. EventSource reconnects after a dropped stream and invalidates inventory queries after `software.inventory`. Room assignments can be read and saved through `/api/v1/rooms/{id}/layout`; the dashboard provides an editor for approved devices and grid positions.
 
-Software/process/USB/remote access pages remain unavailable because those APIs are not implemented. Device details now show current telemetry, metric history, storage, and interfaces; the overview shows fleet telemetry aggregates. See `docs/LabGuard_LAN_Deployment.md` for local, LAN and production preparation guidance.
+- `GET /software`, `GET /software/summary`, and `GET /software/{software_key}/installations` power the searchable global inventory page, aggregate cards, and application installation drawer.
+- `GET /devices/{id}/software` powers the device Software tab, including collection freshness, source, scope, version, and publisher. LAB_ADMIN+ can request an immediate full scan with `POST /devices/{id}/software/refresh`; server-side role and CSRF checks remain authoritative.
+
+Software inventory uses actual server data. Software deployment/process/USB/remote access pages remain unavailable because those APIs are not implemented. Device details show current telemetry, metric history, storage, interfaces, and installed software; the overview shows fleet telemetry aggregates. See `docs/LabGuard_LAN_Deployment.md` for local, LAN and production preparation guidance.

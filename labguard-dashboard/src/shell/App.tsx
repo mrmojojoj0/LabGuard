@@ -39,6 +39,8 @@ import { RoomsPage } from "../features/rooms/RoomsPage";
 import { EnrollmentPage } from "../features/enrollment/EnrollmentPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
 import { AuditPage } from "../features/audit/AuditPage";
+import { SoftwarePage } from "../features/software/SoftwarePage";
+import { SoftwareDeploymentPage } from "../features/software/SoftwareDeploymentPage";
 import { ComingSoon } from "../components/ui";
 import type { Device } from "../lib/types";
 
@@ -333,9 +335,26 @@ function AdminEventBridge() {
       void queryClient.invalidateQueries({ queryKey: ["telemetry-history"] });
       void queryClient.invalidateQueries({ queryKey: ["telemetry-summary"] });
     };
+    const refreshSoftware = (event: MessageEvent<string>) => {
+      const data = JSON.parse(event.data) as { device_id?: string };
+      void queryClient.invalidateQueries({ queryKey: ["software"] });
+      void queryClient.invalidateQueries({ queryKey: ["software-summary"] });
+      if (data.device_id) {
+        void queryClient.invalidateQueries({ queryKey: ["device-software", data.device_id] });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ["device-software"] });
+      }
+    };
+    const refreshSoftwareJobs = (event: MessageEvent<string>) => {
+      const data = JSON.parse(event.data) as { device_id?: string };
+      void queryClient.invalidateQueries({ queryKey: ["software-jobs"] });
+      if (data.device_id) void queryClient.invalidateQueries({ queryKey: ["software-jobs", data.device_id] });
+    };
     stream.addEventListener("device.status", refresh);
     stream.addEventListener("device.connection", refresh);
     stream.addEventListener("device.telemetry", refreshTelemetry);
+    stream.addEventListener("software.inventory", refreshSoftware);
+    stream.addEventListener("software.job", refreshSoftwareJobs);
     const deviceDeleted = (event: MessageEvent<string>) => {
       const id = (JSON.parse(event.data) as { device_id: string }).device_id;
       queryClient.setQueryData<Device[]>(["devices"], (current) =>
@@ -376,11 +395,11 @@ function RoutedShell() {
           <Route path="/audit" element={<AuditPage />} />
           <Route
             path="/software"
-            element={<Placeholder title="Software Inventory" />}
+            element={<SoftwarePage />}
           />
           <Route
             path="/deployment"
-            element={<Placeholder title="Software Deployment" />}
+            element={<SoftwareDeploymentPage />}
           />
           <Route
             path="/processes"
