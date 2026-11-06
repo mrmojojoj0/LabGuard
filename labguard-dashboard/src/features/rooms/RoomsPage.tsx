@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from 'react'
 import { DragDropProvider, useDraggable, useDroppable } from '@dnd-kit/react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, Check, ChevronDown, Computer, GripVertical, LayoutGrid, Monitor, Pencil, Plus, Presentation, Save, X } from 'lucide-react'
+import { ArrowDown, Check, ChevronDown, Computer, GripVertical, LayoutGrid, MarginTop, Monitor, Pencil, Plus, Presentation, Save, X } from 'lucide-react'
 import { roomsApi } from './api'
 import { devicesApi } from '../devices/api'
 import { Button, Empty, PageHeader, Panel, PanelTitle, QueryError, Skeleton } from '../../components/ui'
@@ -31,8 +31,11 @@ function DeviceCard({ device, status, editable, onInspect }: DeviceCardProps) {
   const displayName = device.assigned_name || device.hostname
   return <article ref={drag.ref} className={`lab-device-card ${drag.isDragging ? 'is-dragging' : ''} ${canDrag ? '' : 'is-static'}`}>
     <button type="button" className="lab-device-main" onClick={() => onInspect(device)} aria-label={`View ${displayName} details`}>
+      <div  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        
       <span className="lab-device-icon"><Monitor size={19} /></span>
       <span className="lab-device-label"><strong title={displayName}>{displayName}</strong><small>{device.hostname}</small></span>
+      </div>
       <LabStatus value={state} />
     </button>
 
@@ -86,6 +89,7 @@ function DeviceInspector({ item, status, coordinate, onClose }: {
         <div><dt>Workstation</dt><dd>{coordinate || 'Unassigned'}</dd></div>
       </dl>
       <p className="lab-inspector-note">Status is based on authenticated heartbeats received by the server.</p>
+      <a href={`/devices/${item.id}`} target="_blank" rel="noopener noreferrer" className="lab-inspector-link ">View full device details</a>
     </aside>
   </div>
 }

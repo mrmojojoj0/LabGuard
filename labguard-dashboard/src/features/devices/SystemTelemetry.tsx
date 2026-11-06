@@ -41,7 +41,7 @@ export function SystemTelemetry({ id }: { id: string }) {
   if (!data) return <Panel><PanelTitle>System telemetry</PanelTitle><div className="telemetry-unavailable"><Activity size={18} /><strong>Waiting for the first telemetry report</strong><span>Metrics appear after the agent connects and completes its initial collection.</span></div></Panel>
   const os = data.operating_system
   return <div className="telemetry-stack">
-    <Panel><PanelTitle aside={<span className={`telemetry-freshness ${latest.data?.stale ? 'is-stale' : ''}`}>{latest.data?.stale ? 'STALE' : 'CURRENT'}</span>}>System overview</PanelTitle>
+    <Panel className='telemetry-panel'><PanelTitle aside={<span className={`telemetry-freshness ${latest.data?.stale ? 'is-stale' : ''}`}>{latest.data?.stale ? 'STALE' : 'CURRENT'}</span>}>System overview</PanelTitle>
       <div className="telemetry-last-update">Last update received {new Date(data.received_at).toLocaleString()}{latest.data?.stale ? ` · older than ${latest.data.stale_after_seconds}s` : ''}</div>
       <div className="telemetry-metrics">
         <div><Cpu size={16} /><span>CPU utilization</span><strong>{data.cpu.utilization_percent.toFixed(1)}%</strong><small>{data.cpu.processor_name || 'Processor name unavailable'} · {data.cpu.logical_processors} logical{data.cpu.physical_cores ? ` · ${data.cpu.physical_cores} cores` : ''}</small></div>
