@@ -13,7 +13,7 @@ from labguard_server.models import (AuditEvent, Device, DeviceTicket, SoftwareIn
 from labguard_server.schemas import SoftwareInventoryBatchIn, SoftwareInventoryEntryIn
 from labguard_server.security import digest
 from labguard_server.software_inventory import (device_software_items, global_software_list,
-    inventory_status, record_software_inventory_batch)
+    inventory_status, record_software_inventory_batch, software_summary)
 from tests.conftest import login
 
 
@@ -82,6 +82,25 @@ def test_inventory_persists_updates_changed_versions_batches_and_disappearance(c
         status = inventory_status(db, device_id)
         assert status["status"] == "PARTIAL"
         assert status["last_successful_at"] is not None
+        assert status["last_complete_at"] is not None
+        assert status["last_attempt_status"] == "PARTIAL"
+        assert status["last_attempt_at"] is not None
+        assert status["stale"] is False
+        summary = software_summary(db)
+        assert summary["devices_with_successful_inventory"] == 1
+        assert summary["partial_devices"] == 1
+        assert summary["stale_devices"] == 0
+        old_success_at = now_utc() - timedelta(days=8)
+        for collection in db.scalars(select(SoftwareInventoryCollection).where(
+                SoftwareInventoryCollection.device_id == device_id,
+                SoftwareInventoryCollection.status.in_(("COMPLETE", "PARTIAL", "UNCHANGED")))):
+            collection.completed_at = old_success_at
+        db.commit()
+        stale_status = inventory_status(db, device_id, stale_after_seconds=7 * 24 * 60 * 60)
+        assert stale_status["status"] == "PARTIAL"
+        assert stale_status["last_successful_at"] is not None
+        assert stale_status["stale"] is True
+        assert software_summary(db)["stale_devices"] == 1
 
 
 def test_unchanged_report_refreshes_health_without_resending_items(client):

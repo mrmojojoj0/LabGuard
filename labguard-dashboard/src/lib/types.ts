@@ -113,8 +113,11 @@ export interface SoftwareCollectionStatus {
   request_id?: string | null;
   status: "NEVER" | "IN_PROGRESS" | "COMPLETE" | "PARTIAL" | "FAILED" | "UNCHANGED";
   started_at: string | null;
+  last_attempt_at?: string | null;
+  last_attempt_status?: string;
   completed_at: string | null;
   last_successful_at: string | null;
+  last_complete_at?: string | null;
   discovered_count: number;
   errors: string[];
   stale?: boolean;
@@ -169,6 +172,7 @@ export interface SoftwareCatalogPackage {
   supported_scopes: Array<"MACHINE" | "USER">;
   source: string;
   approved: boolean;
+  approval_status: "PENDING" | "APPROVED" | "REJECTED" | "REVOKED";
   created_at: string;
   approved_at: string | null;
 }

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Search } from "lucide-react";
+import { Link } from "react-router-dom";
 import { Button, Empty, Loading, Panel, PanelTitle, QueryError } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { useAuth } from "../auth/AuthProvider";
@@ -67,7 +68,7 @@ export function SoftwareManagementControls({ id, items }: { id: string; items: S
       <select className={selectClass} aria-label="Filter package manager" value={manager} onChange={(event) => setManager(event.target.value as typeof manager)}><option value="ALL">All package managers</option><option value="WINGET">WinGet</option><option value="CHOCO">Chocolatey</option></select>
       {catalog.isError && <QueryError error={catalog.error} />}
       {catalog.isLoading ? <Loading label="Loading approved catalog…" /> : !approved.length ?
-        <Empty title="No approved packages found" detail="A Super Admin must add and approve packages in Software Inventory." /> :
+        <div className="flex min-h-[210px] flex-col items-center justify-center gap-2 text-center"><strong className="text-xs text-[var(--color-foreground)]">No approved packages found</strong><span className="max-w-lg text-[10px] text-[var(--color-muted)]">WinGet and configured Chocolatey packages appear here after a Super Admin reviews and approves them.</span>{admin?.role === "SUPER_ADMIN" && <Link className="text-[10px] font-semibold text-[var(--color-primary)] underline" to="/deployment">Review software catalog</Link>}</div> :
         <div className="divide-y divide-[var(--color-border)]">{approved.map((pkg) => <div className="flex flex-wrap items-center justify-between gap-3 py-3" key={pkg.id}>
           <div><strong className="block text-[11px] text-[var(--color-foreground)]">{pkg.display_name}</strong>
             <span className="text-[9px] text-[var(--color-muted)]">{pkg.package_id} · {pkg.package_manager} · {pkg.version_policy === "PINNED" ? pkg.approved_version : pkg.version_policy.toLowerCase()}</span>

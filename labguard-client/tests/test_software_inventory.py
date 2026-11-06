@@ -86,6 +86,12 @@ def test_registry_collector_reads_both_views_loaded_profiles_and_deduplicates():
         "DisplayName": "Example App", "DisplayVersion": "2.0", "Publisher": "Example Co",
         "InstallDate": "20250130", "InstallLocation": "C:\\Program Files\\Example"})
     registry.add("HKLM", REGISTRY_PATH, 0x200, "legacy", {"DisplayName": "Legacy", "Publisher": "Old Co"})
+    registry.add("HKLM", REGISTRY_PATH, 0x100, "vc-x86", {
+        "DisplayName": "Visual C++ Runtime", "Publisher": "Microsoft", "Architecture": "x86",
+        "InstallLocation": "C:\\Runtime\\x86"})
+    registry.add("HKLM", REGISTRY_PATH, 0x200, "vc-x64", {
+        "DisplayName": "Visual C++ Runtime", "Publisher": "Microsoft", "Architecture": "x64",
+        "InstallLocation": "C:\\Runtime\\x64"})
     registry.add("HKCU", REGISTRY_PATH, 0x100, "missing-version", {"DisplayName": "User App"})
     sid = registry.users[0]
     registry.add("HKU", sid + "\\" + REGISTRY_PATH, 0x100, "user-app", {"DisplayName": "Profile App"})
@@ -95,20 +101,23 @@ def test_registry_collector_reads_both_views_loaded_profiles_and_deduplicates():
     inventory = collect_software_inventory(winreg_module=registry, which=lambda _name: None,
                                            run=lambda _command: "", windows=True)
     names = {(entry["name"], entry["architecture"], entry["installation_scope"]): entry for entry in inventory.entries}
-    assert ("Example App", "x64", "MACHINE") in names
-    assert ("Legacy", "x86", "MACHINE") in names
-    assert ("Profile App", "x64", "USER") in names
-    assert names[("User App", "x64", "USER")]["version"] is None
+    assert ("Example App", "UNKNOWN", "MACHINE") in names
+    assert ("Legacy", "UNKNOWN", "MACHINE") in names
+    assert ("Profile App", "UNKNOWN", "USER") in names
+    assert names[("User App", "UNKNOWN", "USER")]["version"] is None
+    assert ("Visual C++ Runtime", "x86", "MACHINE") in names
+    assert ("Visual C++ Runtime", "x64", "MACHINE") in names
     assert sum(entry["name"] == "Example App" for entry in inventory.entries) == 1
     assert "registry_entry_access_denied" in inventory.errors
 
 
-def test_optional_package_managers_can_be_absent_or_fail_without_losing_registry_data():
+def test_optional_package_managers_can_be_absent_or_fail_without_losing_registry_data(monkeypatch):
     registry = _Registry()
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
     absent = collect_software_inventory(winreg_module=registry, which=lambda _name: None,
                                         run=lambda _command: "", windows=True)
     assert absent.detected_package_managers == []
-    assert absent.errors == []
+    assert absent.errors == ["winget_executable_not_found"]
 
     def fail(_command):
         raise subprocess.TimeoutExpired(_command, 20)
@@ -116,7 +125,84 @@ def test_optional_package_managers_can_be_absent_or_fail_without_losing_registry
     partial = collect_software_inventory(winreg_module=registry, which=lambda name: name,
                                           run=fail, windows=True)
     assert partial.detected_package_managers == ["WINGET", "CHOCO"]
-    assert set(partial.errors) == {"winget_inventory_unavailable", "chocolatey_inventory_unavailable"}
+    assert set(partial.errors) == {"winget_timeout", "chocolatey_timeout"}
+
+
+def test_registry_inventory_succeeds_when_winget_query_fails():
+    registry = _Registry()
+    from labguard_client.software_inventory import REGISTRY_PATH
+    registry.add("HKLM", REGISTRY_PATH, 0x100, "editor", {
+        "DisplayName": "Registry Editor", "DisplayVersion": "3.0", "Publisher": "Example"})
+
+    def fail(_command):
+        raise RuntimeError("package_registration:14")
+
+    result = collect_software_inventory(winreg_module=registry,
+        which=lambda name: "winget.exe" if name == "winget" else None, run=fail, windows=True)
+    assert any(item["name"] == "Registry Editor" for item in result.entries)
+    assert "winget_package_registration_unavailable" in result.errors
+    assert result.complete is False
+
+
+def test_winget_failures_have_distinct_diagnostics(caplog):
+    from labguard_client.software_inventory import _winget_entries
+
+    failures = [
+        (subprocess.TimeoutExpired(["winget"], 20), "winget_timeout"),
+        (PermissionError("access denied"), "winget_access_denied"),
+        (FileNotFoundError("missing"), "winget_executable_not_found"),
+        (RuntimeError("package_registration:14"), "winget_package_registration_unavailable"),
+        (RuntimeError("command_failed:1"), "winget_command_failed"),
+        (subprocess.SubprocessError("process failed"), "winget_process_error"),
+        (ValueError("winget_table_unavailable"), "winget_query_unavailable"),
+    ]
+    for failure, expected in failures:
+        errors = []
+        entries, detected = _winget_entries(lambda _name: "winget.exe",
+            lambda _command, failure=failure: (_ for _ in ()).throw(failure), errors)
+        assert entries == [] and detected is True
+        assert errors == [expected]
+    assert "WinGet inventory query failed" in caplog.text
+    assert "account=" in caplog.text and "session=" in caplog.text
+
+
+def test_winget_process_failure_classifies_registration_and_access_denial(monkeypatch):
+    from labguard_client.software_inventory import _run_fixed_command
+
+    seen = {}
+    def fake_run(command, **kwargs):
+        seen.update(command=command, kwargs=kwargs)
+        return SimpleNamespace(returncode=1, stdout="", stderr="App Installer registration failed 0x80073D02")
+    monkeypatch.setattr("labguard_client.software_inventory.subprocess.run", fake_run)
+    try:
+        _run_fixed_command(["winget.exe", "list"])
+        raise AssertionError("nonzero process must fail")
+    except RuntimeError as exc:
+        assert str(exc).startswith("package_registration:1")
+    assert seen["kwargs"]["shell"] is False and seen["kwargs"]["timeout"] == 20.0
+
+    monkeypatch.setattr("labguard_client.software_inventory.subprocess.run", lambda *_a, **_k:
+        SimpleNamespace(returncode=5, stdout="", stderr="Access is denied (0x80070005)"))
+    try:
+        _run_fixed_command(["winget.exe", "list"])
+        raise AssertionError("access denial must fail")
+    except RuntimeError as exc:
+        assert str(exc).startswith("access_denied:5")
+
+
+def test_winget_alias_discovery_uses_current_execution_context(monkeypatch):
+    from labguard_client.software_inventory import _winget_entries
+
+    monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\service\\AppData\\Local")
+    monkeypatch.setattr("labguard_client.software_inventory.os.path.isfile", lambda path: path.lower().endswith("winget.exe"))
+    commands = []
+    output = f"{'Name':<20} {'Id':<24} {'Version':<12}\n{'Example Editor':<20} {'Example.Editor':<24} {'1.0':<12}\n"
+    errors = []
+    entries, detected = _winget_entries(lambda _name: None,
+        lambda command: commands.append(command) or output, errors)
+    assert detected and not errors
+    assert commands[0][0].lower().endswith("windowsapps/winget.exe") or commands[0][0].lower().endswith("windowsapps\\winget.exe")
+    assert entries[0]["package_id"] == "Example.Editor"
 
 
 def test_inventory_batching_is_bounded_and_digest_is_stable():

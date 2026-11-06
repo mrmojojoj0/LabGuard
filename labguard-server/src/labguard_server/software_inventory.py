@@ -5,7 +5,7 @@ import hashlib
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from labguard_server.models import (Device, DeviceCredential, DeviceStatus, SoftwareInventoryBatchReceipt,
@@ -154,17 +154,25 @@ def inventory_status(db: Session, device_id: UUID, stale_after_seconds: int = 48
     ).order_by(SoftwareInventoryCollection.started_at.desc()).limit(1))
     successful = db.scalar(select(SoftwareInventoryCollection).where(
         SoftwareInventoryCollection.device_id == device_id,
+        SoftwareInventoryCollection.status.in_(("COMPLETE", "UNCHANGED", "PARTIAL")),
+    ).order_by(SoftwareInventoryCollection.completed_at.desc()).limit(1))
+    complete = db.scalar(select(SoftwareInventoryCollection).where(
+        SoftwareInventoryCollection.device_id == device_id,
         SoftwareInventoryCollection.status.in_(("COMPLETE", "UNCHANGED")),
     ).order_by(SoftwareInventoryCollection.completed_at.desc()).limit(1))
     if latest is None:
         return {"status": "NEVER", "started_at": None, "completed_at": None,
-                "last_successful_at": None, "discovered_count": 0, "errors": []}
+                "last_attempt_at": None, "last_attempt_status": "NEVER",
+                "last_successful_at": None, "last_complete_at": None,
+                "discovered_count": 0, "errors": [], "stale": True}
     successful_at = _utc(successful.completed_at) if successful and successful.completed_at else None
     is_stale = successful_at is None or (now_utc() - successful_at).total_seconds() > stale_after_seconds
     return {"collection_id": str(latest.id), "request_id": str(latest.request_id) if latest.request_id else None,
             "status": latest.status, "started_at": latest.started_at.isoformat(),
+            "last_attempt_at": latest.started_at.isoformat(), "last_attempt_status": latest.status,
             "completed_at": latest.completed_at.isoformat() if latest.completed_at else None,
             "last_successful_at": successful.completed_at.isoformat() if successful and successful.completed_at else None,
+            "last_complete_at": complete.completed_at.isoformat() if complete and complete.completed_at else None,
             "discovered_count": latest.discovered_count, "errors": latest.errors or [], "stale": is_stale}
 
 
@@ -242,8 +250,8 @@ def software_summary(db: Session, stale_after_seconds: int = 604800) -> dict:
     unique_count = db.scalar(select(func.count(func.distinct(SoftwareInventoryItem.product_key))).where(present)) or 0
     installation_count = db.scalar(select(func.count()).select_from(SoftwareInventoryItem).where(present)) or 0
     successful = select(SoftwareInventoryCollection.device_id,
-        func.max(SoftwareInventoryCollection.completed_at).label("last_success")).where(
-            SoftwareInventoryCollection.status.in_(("COMPLETE", "UNCHANGED"))
+            func.max(SoftwareInventoryCollection.completed_at).label("last_success")).where(
+            SoftwareInventoryCollection.status.in_(("COMPLETE", "UNCHANGED", "PARTIAL"))
         ).group_by(SoftwareInventoryCollection.device_id).subquery()
     success_count = db.scalar(select(func.count()).select_from(successful)) or 0
     never_count = db.scalar(select(func.count()).select_from(Device).where(
@@ -251,10 +259,17 @@ def software_summary(db: Session, stale_after_seconds: int = 604800) -> dict:
         ~Device.id.in_(select(successful.c.device_id)))) or 0
     stale_count = db.scalar(select(func.count()).select_from(successful).where(
         successful.c.last_success < now_utc() - timedelta(seconds=stale_after_seconds))) or 0
-    partial_count = db.scalar(select(func.count(func.distinct(SoftwareInventoryCollection.device_id))).where(
-        SoftwareInventoryCollection.status == "PARTIAL")) or 0
-    in_progress = db.scalar(select(func.count(func.distinct(SoftwareInventoryCollection.device_id))).where(
-        SoftwareInventoryCollection.status == "IN_PROGRESS")) or 0
+    latest_started = select(SoftwareInventoryCollection.device_id,
+        func.max(SoftwareInventoryCollection.started_at).label("latest_started")).group_by(
+            SoftwareInventoryCollection.device_id).subquery()
+    latest_status = select(SoftwareInventoryCollection.device_id,
+        SoftwareInventoryCollection.status).join(latest_started, and_(
+            SoftwareInventoryCollection.device_id == latest_started.c.device_id,
+            SoftwareInventoryCollection.started_at == latest_started.c.latest_started)).subquery()
+    partial_count = db.scalar(select(func.count()).select_from(latest_status).where(
+        latest_status.c.status == "PARTIAL")) or 0
+    in_progress = db.scalar(select(func.count()).select_from(latest_status).where(
+        latest_status.c.status == "IN_PROGRESS")) or 0
     common, _ = global_software_list(db, limit=5)
     return {"unique_applications": unique_count, "total_installations": installation_count,
             "devices_with_successful_inventory": success_count, "stale_devices": stale_count,

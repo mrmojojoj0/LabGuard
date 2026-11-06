@@ -22,12 +22,15 @@ def test_software_jobs_migration_downgrade_and_upgrade_sqlite(tmp_path, monkeypa
     command.upgrade(config, "head")
     command.downgrade(config, "0004_software_inventory")
     with create_engine(database_url).connect() as connection:
-        assert "software_jobs" not in inspect(connection).get_table_names()
+        tables = inspect(connection).get_table_names()
+        assert "software_jobs" not in tables
+        assert "software_catalog_packages" not in tables
         assert "job_id" not in {column["name"] for column in inspect(connection).get_columns("software_inventory_collections")}
     command.upgrade(config, "head")
     with create_engine(database_url).connect() as connection:
         assert "software_jobs" in inspect(connection).get_table_names()
         assert "job_id" in {column["name"] for column in inspect(connection).get_columns("software_inventory_collections")}
+        assert "approval_status" in {column["name"] for column in inspect(connection).get_columns("software_catalog_packages")}
 
 
 def enrolled_device(client, name="SOFTWARE-JOBS-PC"):
@@ -128,6 +131,34 @@ def test_catalog_mutations_require_super_admin_csrf(client):
     insufficient_role = client.post("/api/v1/software/catalog", json=body,
         headers={"X-CSRF-Token": viewer_csrf})
     assert insufficient_role.status_code == 403
+
+
+def test_catalog_reject_approve_and_approved_visibility(client):
+    csrf = login(client)
+    headers = {"X-CSRF-Token": csrf}
+    created = client.post("/api/v1/software/catalog", headers=headers, json={
+        "display_name": "Reviewable Editor", "package_id": "Reviewable.Editor",
+        "package_manager": "WINGET", "publisher": "Review Co", "description": "Editor description",
+        "version_policy": "LATEST", "supported_scopes": ["MACHINE"],
+    })
+    assert created.status_code == 201, created.text
+    package = created.json()
+    assert package["approval_status"] == "PENDING"
+    viewer_csrf = login(client, "viewer", "viewer-password-123")
+    viewer_catalog = client.get("/api/v1/software/catalog", headers={"X-CSRF-Token": viewer_csrf})
+    assert "Reviewable.Editor" not in [row["package_id"] for row in viewer_catalog.json()]
+    headers = {"X-CSRF-Token": login(client)}
+
+    rejected = client.post(f"/api/v1/software/catalog/{package['id']}/reject", headers=headers)
+    assert rejected.status_code == 200 and rejected.json()["approval_status"] == "REJECTED"
+    assert not rejected.json()["approved"]
+    approved = client.post(f"/api/v1/software/catalog/{package['id']}/approve", headers=headers)
+    assert approved.status_code == 200 and approved.json()["approval_status"] == "APPROVED"
+    visible = client.get("/api/v1/software/catalog")
+    assert any(row["id"] == package["id"] for row in visible.json())
+    with client.app.state.session_factory() as db:
+        rejected_audit = db.scalar(select(AuditEvent).where(AuditEvent.action == "software.catalog.reject"))
+        assert rejected_audit is not None
 
 
 def test_job_event_lifecycle_progress_and_result_are_persisted(client):

@@ -1,8 +1,67 @@
-# LabGuard Architecture Decision Record
+# LabGuard Architecture and Current Implementation
 
-Status: Phase 0 architecture baseline | Date: 2026-11-02
+Status: Implemented foundation through v0.6 software management corrections | Updated: 2026-11-06
 
-This resolves the complete technical outline for two independent Python deployables, targeting an initial fleet of about 50 Windows PCs. This is architecture planning only; it does not start Phase 1.
+This document describes the current repository architecture. The original Phase 0 baseline is retained below as historical context; where it differs from the current implementation described here, this current implementation section is authoritative. For the current worktree, milestone state and verification see `docs/LabGuard_Development_State.md`.
+
+## Current system
+
+LabGuard has three separate projects: a FastAPI/Pydantic/SQLAlchemy server in `labguard-server`, a Python 3.12 Windows agent in `labguard-client`, and a React/Vite/TypeScript dashboard in `labguard-dashboard`. PostgreSQL is the deployment database; server integration tests use SQLite and apply Alembic migrations. The dashboard is a separate development/build process and uses the server's same-origin `/api/v1` contract. The API and agent WebSocket run from the server; an authenticated admin Server-Sent Events endpoint supplies query invalidations to the dashboard.
+
+The implemented server handles administrator sessions and role checks, CSRF-protected mutations, enrollment and approval, Ed25519 device credentials and single-use WebSocket tickets, rooms and atomic grid layouts, device status, audit events, telemetry, software inventory, approved package catalog entries, and persistent individual software jobs. The dashboard provides fleet/device views, a room floor-plan editor, telemetry and history, inventory, audit, and individual software-management pages. The client supports foreground execution and a Windows Service, protected identity state, heartbeat/reconnect, telemetry, software inventory, and v0.6 allowlisted WinGet/Chocolatey jobs. Do not infer product capabilities from placeholder navigation items.
+
+### Identity, authorization, and audit
+
+Administrator credentials use server-managed, revocable sessions in HttpOnly cookies. Browser mutations use the session CSRF token in `X-CSRF-Token`; role enforcement is server-side. Roles are VIEWER, OPERATOR, LAB_ADMIN, and SUPER_ADMIN. Device identities are persistent UUIDs bound to approved Ed25519 public keys; the private key stays client-side under DPAPI. The agent proves possession through HTTPS challenge/ticket endpoints; the short-lived ticket is stored hashed, single-use, device-bound, and presented in the WSS Authorization header. TLS verification stays enabled except for explicit local-development opt-in.
+
+Audit records are written with their associated privileged database mutations. Device identity is derived from the authenticated ticket on ingestion; a payload's device ID is never sufficient authority. Deletion audit rows retain a text target and a bounded snapshot so they outlive device-owned cascades.
+
+### Database and migrations
+
+Migration head is `0006_catalog_review_status`, chained as 0001 foundation, 0002 device authentication/status, 0003 telemetry, 0004 software inventory, 0005 catalog/jobs, and 0006 explicit catalog review state. Model definitions are in `labguard-server/src/labguard_server/models.py`. The v0.5 inventory migration stores collections, unique batch receipts, and device software entries, with complete/partial reconciliation rules. Migration 0005 stores catalog approval metadata and software job state and adds nullable `software_inventory_collections.job_id` with `ON DELETE SET NULL`. Migration 0006 adds the indexed `approval_status` (`PENDING`, `APPROVED`, `REJECTED`, `REVOKED`) and backfills existing approvals. SQLite upgrade/downgrade/upgrade is tested. PostgreSQL migration execution has not been verified in this worktree.
+
+### REST API
+
+All routes are under `/api/v1`; the route implementation is `labguard-server/src/labguard_server/api.py`. Existing APIs include authentication, enrollment, device/credential lifecycle and deletion, rooms/layout, status, audit, telemetry, and software inventory. The v0.5 software inventory reads are `GET /devices/{id}/software`, `GET /software`, `GET /software/summary`, and `GET /software/{software_key}/installations`; an authorized administrator can request an online scan with `POST /devices/{id}/software/refresh`.
+
+The v0.6 software-management endpoints are:
+
+- Viewer+: `GET /software/catalog`, `GET /software/jobs`, `GET /devices/{id}/software/jobs`, and `GET /software/jobs/{job_id}`. Non-Super-Admin catalog reads return approved entries only.
+- Super Admin + CSRF: `POST /software/catalog`, `POST /software/catalog/{package_id}/approve`, `/reject`, and `/revoke`.
+- LAB_ADMIN+ + CSRF: `POST /devices/{id}/software/jobs` (202 Accepted). A request targets one device; offline jobs remain pending.
+
+Catalog package IDs are strict allowlisted identifiers. New entries begin as PENDING; Super Admin can review metadata and approve or reject them. Rejected entries remain in the catalog for audit and can be re-reviewed. Revocation removes an approved package from operator visibility. Only approved packages are returned to non-Super-Admin readers and can be used for jobs. No route accepts an arbitrary URL, executable path, PowerShell, CMD, or shell command. WinGet is fixed to its community source label. Chocolatey uses only `CHOCOLATEY_SOURCE_URL`, which must be HTTPS and contain no embedded credentials/query/fragment. Job requests and catalog create/review/approval/revocation actions are audited.
+
+### Agent WebSocket and admin SSE
+
+The existing authenticated WSS endpoint is `/api/v1/agent/session`; the envelope remains `protocol=labguard.agent`, `schema_version=1`, event UUID, device UUID, monotonic per-device sequence, timestamp, type and typed payload. Heartbeat, telemetry and software inventory use that session. Telemetry and inventory errors are isolated from heartbeat processing. Frames and nested payloads are bounded and validated.
+
+Software inventory uses `client.software_inventory` and server acknowledgements. Administrator refresh uses `server.software_inventory.refresh` with a server-issued request UUID. v0.6 adds these typed events without changing the envelope version:
+
+- Server to client: `server.software_job.offer` with job ID, action, package ID/manager, version, scope, approved source, expiry and timeout.
+- Client to server: `client.job.accepted`, `client.job.started`, `client.job.progress`, `client.job.completed`, and `client.job.failed`.
+
+The server binds events to the authenticated device, validates job ownership/state and sequence, persists each transition, and acknowledges the event. The authenticated admin SSE stream publishes `software.inventory` and `software.job` invalidations (also device status/connection/telemetry/deletion events). SSE carries invalidation metadata, not telemetry or secrets. The dashboard does not connect to the agent WSS endpoint.
+
+### Individual software job lifecycle
+
+`SoftwareCatalogPackage` requires Super Admin review before a job can reference it. Version policies are LATEST, PINNED, or SELECTABLE; scope is constrained by the package entry. An uninstall additionally requires a present inventory item with matching exact package ID, manager source and supported scope; registry uninstall command strings are never executed. The server allows only one active software job per device. Job statuses are PENDING, DISPATCHED, RUNNING, SUCCEEDED, FAILED, CANCELLED, or EXPIRED; the current REST interface does not provide an administrator cancellation operation even though CANCELLED is reserved in the model.
+
+Jobs are persisted and audited before delivery. Offline jobs stay PENDING until an authenticated reconnect; expired work is not dispatched. DISPATCHED/RUNNING offers may be redelivered. The client writes a bounded durable journal before side effects; terminal results are replayed and a job interrupted while RUNNING is reported as uncertain instead of executed again. This prevents automatic duplicate execution at the cost of manual review/retry when completion is uncertain. The agent sends progress separately from heartbeat and runs collection/transmission outside the heartbeat loop. It reports success only when the manager exits successfully and a fresh inventory confirms the requested installed/removed state.
+
+The package-manager adapters use fixed argument arrays with `shell=False`, bounded runtime/output, sanitized reporting, exact IDs, and safe executable discovery. Machine scope requires elevation. Session 0 jobs for USER scope are rejected under LocalSystem and custom service accounts; user-scope WinGet is supported only from a foreground interactive process. No identity/account switching or interactive helper exists. Chocolatey is machine-only. Missing package managers fail the job without taking down the agent.
+
+### Dashboard pages
+
+`/rooms` provides visual room grid editing. Device details include overview, telemetry, and Software tabs. The Software Inventory page shows stored inventory and device installations. `/deployment` provides catalog search/review for Super Admins and real persisted job monitoring; device Software controls allow install/uninstall requests with confirmation. Admin-event SSE invalidates relevant React Query caches. Role-gated buttons supplement, but never replace, server authorization.
+
+### Verified state and remaining verification
+
+For the v0.6 correction worktree on 2026-11-06, verification recorded: server 33 passed, client 29 passed, dashboard 12 passed; dashboard typecheck and production build passed; SQLite migration upgrade/downgrade/upgrade through migration 0006 passed. PostgreSQL migration behavior and real Windows package-manager/service-context operations remain unverified. The production build reports that the main JavaScript chunk exceeds 500 kB. See Development State for outstanding manual checks and the v0.7 handoff.
+
+## Historical Phase 0 baseline
+
+The following sections preserve the original architecture choices and threat-model context. They describe the initial target, not a complete list of current endpoints or current milestone status. The implemented REST, schema, and feature sections above supersede statements below that label software deployment as deferred, describe the database schema as planning-only, or list APIs that do not yet exist.
 
 ## Decisions and conflicts resolved
 
@@ -85,15 +144,15 @@ Enrollment flow: administrator creates short-lived one-use code; client generate
 
 Heartbeat period defaults to 10s; DELAYED at 30s; OFFLINE at 60s since last server receipt. Require heartbeat < delayed < offline. Approved device without first heartbeat is NEVER_CONNECTED. Authenticated hello/heartbeat sets ONLINE; age thresholds produce DELAYED/OFFLINE. DISABLED and QUARANTINED override liveness and block jobs. Socket close alone does not immediately mean offline. Persist last heartbeat and evaluate stale devices after server restart. Record every state transition and reason. Reachability is separate UNKNOWN unless explicitly checked. Client reconnect uses exponential backoff with full jitter and cap around 60s.
 
-## Authorization and job allowlist
+## Historical authorization and job allowlist proposal (superseded by v0.6 above)
 
 Roles: Viewer (read-only), Operator (request approved non-destructive collection), Lab Admin (devices/rooms/catalog/jobs), Super Admin (accounts, credentials, global settings, grants). Enforce per action and per job; approval must be satisfied before offer.
 
-MVP jobs: COLLECT_SYSTEM_INFO, COLLECT_NETWORK_STATS (interface counters), RUN_APPROVED_DIAGNOSTIC (fixed built-in diagnostic IDs; no command text). Read-only. Later phases may add approved package-ID install/uninstall/upgrade, protected-process-safe termination with PID+start-time, and restart/shutdown with approval and user notice. No arbitrary shell, command text, executable path, covert UI, security bypass, or payload capture. All jobs have immutable typed params, requester, expiry, idempotency key, approval, per-device state, bounded output, and audit trail.
+The original plan proposed read-only diagnostic jobs and deferred package operations. v0.6 has since implemented approved individual install/uninstall jobs as documented in the current section above. Process termination, restart/shutdown, arbitrary shell, command text, executable paths, covert UI, security bypass, and payload capture remain out of scope.
 
-## Phase 0 completion and next step
+## Historical Phase 0 planning gate
 
-Architecture review is complete when this document and both project AGENTS.md files are accepted. Do not start Phase 1 until the project owner authorizes it. Recommended next implementation task after authorization: server foundation with migrations, admin session/RBAC, pending/approved device registry, room/layout transaction, and audit; then the first end-to-end hello/heartbeat. Before production, confirm hosting OS, Windows baseline, TLS/certificate issuance, admin bootstrap, privacy/retention, and mTLS vs HTTPS-issued WSS ticket feasibility.
+The initial Phase 0 architecture review and Phase 1 authorization gate are historical and have been superseded by the implemented milestones listed in this document and the current handoff in `LabGuard_Development_State.md`. Do not use the old foundation task list below as a statement of unfinished implementation. Production deployment still requires the outstanding checks recorded in Development State.
 
 ## v0.2 administrator event stream
 
@@ -101,7 +160,7 @@ The administrator dashboard uses a separate same-origin Server-Sent Events endpo
 
 ## Device removal
 
-`DELETE /api/v1/devices/{device_id}` requires an authenticated LAB_ADMIN or SUPER_ADMIN session and a valid CSRF token. The server locks and verifies the target, marks its credential revoked, writes a `device.delete` audit event containing a bounded device identity snapshot, then deletes the device in one transaction. Device-owned credentials, tickets, challenges, status records/events, telemetry, and room placements use existing foreign-key cascades; the containing room remains intact. The append-only `audit_events` table stores device targets as text rather than a device foreign key, so prior audit history and the deletion snapshot remain after removal. Jobs are not implemented in this server version. After commit, the server removes and closes the active WebSocket, then emits the metrics-free `device.deleted` administrator event. A deleted UUID cannot obtain a new challenge or claim a prior ticket; the endpoint does not affect other devices.
+`DELETE /api/v1/devices/{device_id}` requires an authenticated LAB_ADMIN or SUPER_ADMIN session and a valid CSRF token. The server locks and verifies the target, revokes its credential, writes a `device.delete` audit snapshot, and removes the device. Device-owned credentials, tickets, challenges, status, telemetry, software inventory, software jobs and room placement follow their configured foreign-key cascades; audit events remain queryable by text target ID. After commit, the server closes the active WebSocket and emits the `device.deleted` admin event. A deleted device must enroll and be approved again to reconnect.
 
 ## Device authentication and heartbeat implementation detail
 
@@ -121,12 +180,14 @@ Metrics include CPU model, logical/physical counts and utilization; total/used/a
 
 `device_telemetry_latest` stores the newest full snapshot and `telemetry_samples` stores one indexed CPU/memory/weighted-disk row per accepted report. The server enforces `TELEMETRY_MIN_INTERVAL_SECONDS` (default 10), deletes old chart rows hourly and during ingest, and retains 30 days by default (`TELEMETRY_RETENTION_DAYS`). Current snapshots are considered stale after `TELEMETRY_STALE_AFTER_SECONDS` (default 120). Viewer-authenticated endpoints are GET `/api/v1/devices/{id}/telemetry`, GET `/api/v1/devices/{id}/telemetry/history?limit=120` (limit max 500), and GET `/api/v1/telemetry/summary`. The existing authenticated admin SSE stream emits a metrics-free `device.telemetry` invalidation event with device UUID and server receipt time.
 
-Software inventory protocol, collection, schema, RBAC, API, and retention decisions for v0.5 are documented in `docs/LabGuard_v0.5_Software_Inventory.md`.
+Software inventory uses registry uninstall records plus optional local WinGet/Chocolatey listings. Registry view is not treated as product architecture: architecture comes only from explicit registry metadata and otherwise remains UNKNOWN. Identical representations across registry views are deduplicated using normalized source, scope, package/name, publisher, architecture, and install location; different explicit architectures or locations remain distinct. A version update refreshes the same installation entry. Optional manager failures produce source-specific diagnostics and do not discard registry entries. WinGet discovery checks PATH and the current execution identity's App Execution Alias location; logs include safe reason codes (missing executable, access denied, timeout, registration, command/output failure), the account/session, and whether the relevant user environment is present, without dumping environment values. This does not establish the cause of the Krypton report; its actual service/foreground execution context still requires device-side verification.
+
+Inventory collection status separates latest attempt from freshness: COMPLETE and UNCHANGED are complete successes; PARTIAL is a successful, fresh snapshot with warnings and does not mark unseen software absent; FAILED and IN_PROGRESS do not overwrite the last successful snapshot. The API exposes latest attempt time/status, `last_successful_at` (including PARTIAL), `last_complete_at`, errors, and stale state computed from the most recent successful completion. Dashboard displays all three timestamps and distinguishes partial/current, failed attempt with prior snapshot, and stale inventory. Software inventory protocol, collection, schema, RBAC, API, and retention decisions for v0.5 are documented in `docs/LabGuard_v0.5_Software_Inventory.md`.
 
 ## v0.6 individual software management
 
-Software management uses the existing ticket-authenticated WSS envelope (schema_version 1). The REST surface is `GET /software/catalog`, Super Admin `POST /software/catalog`, `POST /software/catalog/{package_id}/approve|revoke`, LAB_ADMIN+ `POST /devices/{device_id}/software/jobs`, and Viewer+ job reads at `/software/jobs` and `/devices/{device_id}/software/jobs`. Mutations require the existing session, role check and CSRF token. Package IDs are strict identifiers; no executable paths or arbitrary download URLs are accepted. WinGet is pinned to its community source label. Chocolatey jobs use only the server-configured HTTPS `CHOCOLATEY_SOURCE_URL`.
+Software management uses the existing ticket-authenticated WSS envelope (schema_version 1). The REST surface is `GET /software/catalog`, Super Admin `POST /software/catalog`, `POST /software/catalog/{package_id}/approve|reject|revoke`, LAB_ADMIN+ `POST /devices/{device_id}/software/jobs`, and Viewer+ job reads at `/software/jobs` and `/devices/{device_id}/software/jobs`. Mutations require the existing session, role check and CSRF token. Package IDs are strict identifiers; no executable paths or arbitrary download URLs are accepted. WinGet is pinned to its community source label. Chocolatey jobs use only the server-configured HTTPS `CHOCOLATEY_SOURCE_URL`.
 
-The server persists reviewed catalog entries and software jobs in migration `0005_software_jobs`. Jobs store the target device, exact manager and package ID, action/version/scope, requesting administrator, expiry, progress and result. Offline jobs stay PENDING; reconnect delivers only nonexpired jobs. The server permits one active software operation per device and audits catalog review and job requests. Device event identity is taken from its authenticated WebSocket ticket. The typed server event `server.software_job.offer` carries the approved action and exact package details; client events `client.job.accepted`, `client.job.started`, `client.job.progress`, `client.job.completed`, and `client.job.failed` report lifecycle. This is an additive schema_version 1 event change. Reconnect can redeliver an offer; the agent's durable journal replays completed results and prevents repeating uncertain interrupted jobs. `software.job` SSE events invalidate dashboard job queries.
+The server persists reviewed catalog entries and software jobs in migrations `0005_software_jobs` and `0006_catalog_review_status`. Jobs store the target device, exact manager and package ID, action/version/scope, requesting administrator, expiry, progress and result. Offline jobs stay PENDING; reconnect delivers only nonexpired jobs. The server permits one active software operation per device and audits catalog review and job requests. Device event identity is taken from its authenticated WebSocket ticket. The typed server event `server.software_job.offer` carries the approved action and exact package details; client events `client.job.accepted`, `client.job.started`, `client.job.progress`, `client.job.completed`, and `client.job.failed` report lifecycle. This is an additive schema_version 1 event change. Reconnect can redeliver an offer; the agent's durable journal replays completed results and prevents repeating uncertain interrupted jobs. `software.job` SSE events invalidate dashboard job queries.
 
 The client launches WinGet or Chocolatey with fixed argument arrays and `shell=False`, uses bounded timeouts and output capture, and scans inventory after the operation. A job succeeds only when the package-manager command exits successfully and the subsequent inventory confirms the requested state. USER-scope jobs are rejected in every Session 0 service process, including LocalSystem and custom service accounts. Machine scope requires elevation; Chocolatey is machine-only. LabGuard does not switch service accounts or launch an interactive helper. WinGet discovery accepts only the registered WindowsApps alias or Desktop App Installer package location; Chocolatey discovery accepts only its configured ProgramData path. Registry uninstall command strings are never executed.

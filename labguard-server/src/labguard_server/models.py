@@ -198,6 +198,7 @@ class SoftwareCatalogPackage(Base):
     supported_scopes: Mapped[list] = mapped_column(JSON, default=list)
     source: Mapped[str] = mapped_column(String(32))
     approved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    approval_status: Mapped[str] = mapped_column(String(16), default="PENDING", server_default="PENDING", index=True)
     created_by: Mapped[UUID | None] = mapped_column(ForeignKey("administrators.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

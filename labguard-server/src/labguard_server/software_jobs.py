@@ -31,6 +31,7 @@ def catalog_out(package: SoftwareCatalogPackage) -> dict:
         "description": package.description, "version_policy": package.version_policy,
         "approved_version": package.approved_version, "supported_scopes": package.supported_scopes,
         "source": package.source, "approved": package.approved,
+        "approval_status": package.approval_status,
         "created_at": package.created_at.isoformat(),
         "approved_at": package.approved_at.isoformat() if package.approved_at else None,
     }

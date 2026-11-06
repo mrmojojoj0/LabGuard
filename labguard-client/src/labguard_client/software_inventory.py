@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import getpass
 import hashlib
 import json
 import logging
@@ -10,6 +11,7 @@ import platform
 import re
 import shutil
 import subprocess
+import getpass
 from typing import Any
 
 REGISTRY_PATH = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -35,6 +37,24 @@ def inventory_digest(entries: list[dict[str, Any]]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _execution_context() -> tuple[str, str]:
+    try:
+        account = getpass.getuser()[:128]
+    except (OSError, KeyError):
+        account = "unknown"
+    session = "unknown"
+    if os.name == "nt":
+        try:
+            import ctypes
+            value = ctypes.c_ulong()
+            ok = ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(value))
+            if ok:
+                session = str(value.value)
+        except (AttributeError, OSError):
+            pass
+    return account, session
+
+
 def _clean(value: Any, limit: int) -> str | None:
     if not isinstance(value, (str, int, float)):
         return None
@@ -42,11 +62,25 @@ def _clean(value: Any, limit: int) -> str | None:
     return text[:limit] or None
 
 
+def _normalize_architecture(value: str | None) -> str:
+    if not value:
+        return "UNKNOWN"
+    normalized = value.strip().casefold().replace("_", "-")
+    if normalized in {"x86", "32", "32-bit", "win32", "i386", "i686"}:
+        return "x86"
+    if normalized in {"x64", "amd64", "64", "64-bit", "x86-64"}:
+        return "x64"
+    if normalized in {"arm64", "aarch64"}:
+        return "ARM64"
+    return value.strip()[:32] or "UNKNOWN"
+
+
 def _make_entry(*, name: str, version: str | None, publisher: str | None,
                 architecture: str | None, install_date: str | None,
                 install_location: str | None, package_id: str | None,
                 source: str, scope: str) -> dict[str, str | None]:
     name = name.strip()[:256]
+    architecture = _normalize_architecture(architecture)
     normalized = "\x1f".join((source, scope, (package_id or name).casefold(),
                              (publisher or "").casefold(), (architecture or "UNKNOWN").casefold(),
                              (install_location or "").casefold()))
@@ -68,8 +102,8 @@ def _registry_entries(winreg, errors: list[str]) -> list[dict[str, str | None]]:
     result: dict[str, dict[str, str | None]] = {}
     is_64_bit = platform.machine().lower() in {"amd64", "x86_64", "arm64", "aarch64"}
     read = winreg.KEY_READ
-    views = [(getattr(winreg, "KEY_WOW64_64KEY", 0), "x64"),
-             (getattr(winreg, "KEY_WOW64_32KEY", 0), "x86")] if is_64_bit else [(0, platform.machine() or "UNKNOWN")]
+    views = [getattr(winreg, "KEY_WOW64_64KEY", 0),
+             getattr(winreg, "KEY_WOW64_32KEY", 0)] if is_64_bit else [0]
     roots: list[tuple[Any, str, str]] = [
         (winreg.HKEY_LOCAL_MACHINE, REGISTRY_PATH, "MACHINE"),
         (winreg.HKEY_CURRENT_USER, REGISTRY_PATH, "USER"),
@@ -91,7 +125,7 @@ def _registry_entries(winreg, errors: list[str]) -> list[dict[str, str | None]]:
             errors.append("registry_access_denied:loaded_user_hives")
 
     for root, path, scope in roots:
-        for view, architecture in views:
+        for view in views:
             try:
                 with winreg.OpenKey(root, path, 0, read | view) as uninstall:
                     index = 0
@@ -123,7 +157,8 @@ def _registry_entries(winreg, errors: list[str]) -> list[dict[str, str | None]]:
                                         pass
                                 item = _make_entry(
                                     name=display_name, version=_clean(value("DisplayVersion"), 128),
-                                    publisher=_clean(value("Publisher"), 256), architecture=architecture,
+                                    publisher=_clean(value("Publisher"), 256),
+                                    architecture=_normalize_architecture(_clean(value("Architecture"), 32)),
                                     install_date=install_date, install_location=_clean(value("InstallLocation"), 1024),
                                     package_id=_clean(value("PackageId") or value("ProductId"), 256),
                                     source="WINDOWS_REGISTRY", scope=scope,
@@ -145,13 +180,33 @@ def _run_fixed_command(command: list[str], timeout: float = 20.0) -> str:
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     completed = subprocess.run(command, **kwargs)
     if completed.returncode != 0:
-        raise RuntimeError("package_manager_query_failed")
+        diagnostic = f"{completed.stdout or ''}\n{completed.stderr or ''}".casefold()
+        if "access is denied" in diagnostic or "0x80070005" in diagnostic:
+            reason = "access_denied"
+        elif any(marker in diagnostic for marker in ("app installer", "package registration", "0x80073d")):
+            reason = "package_registration"
+        else:
+            reason = "command_failed"
+        raise RuntimeError(f"{reason}:{completed.returncode}")
     return completed.stdout[:2_000_000]
 
 
 def _winget_entries(which, run, errors):
     executable = which("winget")
     if not executable:
+        # The Windows App Execution Alias is commonly outside a service
+        # account's PATH. Check only the current execution identity's alias.
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            alias = os.path.join(local_app_data, "Microsoft", "WindowsApps", "winget.exe")
+            if os.path.isfile(alias):
+                executable = alias
+    if not executable:
+        logger = logging.getLogger("labguard_client")
+        account, session = _execution_context()
+        logger.warning("WinGet inventory discovery failed reason=executable_not_found account=%s session=%s local_app_data_present=%s path_entries=%d",
+                       account, session, bool(os.environ.get("LOCALAPPDATA")), len(os.environ.get("PATH", "").split(os.pathsep)))
+        errors.append("winget_executable_not_found")
         return [], False
     try:
         output = run([executable, "list", "--disable-interactivity", "--accept-source-agreements", "--count", "2000"])
@@ -179,9 +234,41 @@ def _winget_entries(which, run, errors):
                 architecture="UNKNOWN", install_date=None, install_location=None, package_id=package_id[0],
                 source="WINGET", scope="UNKNOWN"))
         return entries[:2000], True
-    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
-        errors.append("winget_inventory_unavailable")
-        return [], True
+    except subprocess.TimeoutExpired:
+        category = "timeout"
+    except subprocess.SubprocessError as exc:
+        category = f"process_error:{type(exc).__name__}"
+    except PermissionError as exc:
+        category = f"access_denied:{getattr(exc, 'winerror', None) or 'unknown'}"
+    except FileNotFoundError:
+        category = "executable_not_found"
+    except RuntimeError as exc:
+        category = str(exc).split(":", 1)[0]
+    except ValueError as exc:
+        category = str(exc)
+    except OSError as exc:
+        category = f"process_error:{getattr(exc, 'winerror', None) or type(exc).__name__}"
+    else:
+        return entries[:2000], True
+    account, session = _execution_context()
+    logging.getLogger("labguard_client").warning(
+        "WinGet inventory query failed reason=%s account=%s session=%s executable_found=true local_app_data_present=%s",
+        category[:64], account, session, bool(os.environ.get("LOCALAPPDATA")))
+    if category.startswith("access_denied"):
+        errors.append("winget_access_denied")
+    elif category == "timeout":
+        errors.append("winget_timeout")
+    elif category == "package_registration":
+        errors.append("winget_package_registration_unavailable")
+    elif category == "executable_not_found":
+        errors.append("winget_executable_not_found")
+    elif category.startswith("command_failed"):
+        errors.append("winget_command_failed")
+    elif category.startswith("process_error"):
+        errors.append("winget_process_error")
+    else:
+        errors.append("winget_query_unavailable")
+    return [], True
 
 
 def _chocolatey_entries(which, run, errors):
@@ -202,8 +289,21 @@ def _chocolatey_entries(which, run, errors):
             entries.append(_make_entry(name=package_id, version=version, publisher=None, architecture="UNKNOWN",
                 install_date=None, install_location=None, package_id=package_id, source="CHOCO", scope="MACHINE"))
         return entries[:2000], True
-    except (OSError, subprocess.SubprocessError, RuntimeError):
-        errors.append("chocolatey_inventory_unavailable")
+    except subprocess.TimeoutExpired:
+        errors.append("chocolatey_timeout")
+        logging.getLogger("labguard_client").warning("Chocolatey inventory query failed reason=timeout")
+        return [], True
+    except subprocess.SubprocessError as exc:
+        errors.append("chocolatey_command_failed")
+        logging.getLogger("labguard_client").warning("Chocolatey inventory query failed reason=%s", type(exc).__name__)
+        return [], True
+    except PermissionError as exc:
+        errors.append("chocolatey_access_denied")
+        logging.getLogger("labguard_client").warning("Chocolatey inventory query failed reason=access_denied winerror=%s", getattr(exc, "winerror", None))
+        return [], True
+    except (OSError, RuntimeError) as exc:
+        errors.append("chocolatey_command_failed")
+        logging.getLogger("labguard_client").warning("Chocolatey inventory query failed reason=%s", type(exc).__name__)
         return [], True
 
 

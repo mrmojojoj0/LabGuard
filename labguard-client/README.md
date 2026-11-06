@@ -1,6 +1,6 @@
 # LabGuard Client
 
-Minimal Windows endpoint agent for authenticated device enrollment and heartbeat communication. It has no remote execution, software deployment, process control, packet capture, or USB monitoring functionality.
+Windows endpoint agent for authenticated device enrollment, heartbeat, telemetry, software inventory, and v0.6 individual approved WinGet/Chocolatey software jobs. It does not provide arbitrary remote execution, bulk deployment, process control, packet capture, or USB monitoring.
 
 ## Install
 
@@ -22,7 +22,7 @@ An administrator must first create an eight-character, one-use enrollment code i
 labguard-agent enroll --server https://labguard.example.edu --code <one-time-code>
 ~~~
 
-For the repository launcher, set `LABGUARD_SERVER_URL` to the server base URL, then run `Start-LabGuard-Client.bat enroll`. After approval, run the launcher without arguments. HTTP requires explicit development opt-in by setting `LABGUARD_ALLOW_INSECURE_DEV=1`; keep certificate verification enabled for HTTPS/WSS. See `docs/LabGuard_LAN_Deployment.md` for LAN guidance.
+For the repository launcher, set `LABGUARD_SERVER_URL` to the server base URL, then run `Start-LabGuard-Client.bat enroll`. After approval, run the launcher without arguments. HTTP requires explicit development opt-in by setting `LABGUARD_ALLOW_INSECURE_DEV=1`; keep certificate verification enabled for HTTPS/WSS. See `../docs/LabGuard_LAN_Deployment.md` for LAN guidance.
 
 After an administrator approves the pending UUID and assigns a name, start the agent:
 
@@ -57,8 +57,14 @@ The client tests are in `tests/`; install them with `python -m pip install -e ".
 
 After WSS authentication, the client reads installed application metadata from the Windows uninstall registry in both 64-bit and 32-bit views, and from HKCU plus ordinary user registry hives that are currently loaded and accessible. It reports bounded app name, version, publisher, architecture, install date/location, package identifier, source, and machine/user scope. It does not read uninstall command lines, run installers, or inspect user files. Registry access failures are recorded as bounded error codes and make the scan partial.
 
-If available, the agent also queries winget and Chocolatey with fixed argument lists and no shell. Those results are identified by source; package manager absence does not prevent registry collection. Package manager output depends on the locally installed CLI and its configured access. Per-user applications in unloaded hives are not visible to LocalSystem and are omitted; run the service under a suitable account or log in to load the user hive if those entries are needed.
+If available, the agent also queries WinGet and Chocolatey with fixed argument lists and no shell. Those results are identified by source; package manager absence or failure does not discard registry results. WinGet discovery checks PATH and the current account's WindowsApps alias and logs a reason code for missing executable, access denial, timeout, App Installer registration, command failure, or unusable output, along with the account/session and safe environment-presence facts. The reported Krypton service-context failure still requires device-side diagnostic confirmation. Per-user applications in unloaded hives are omitted. Foreground collection can read the current user's accessible hive; a service only sees loaded hives accessible to its service token. Do not switch service accounts as a workaround for software management.
 
 Inventory is sent over the existing ticket-authenticated WSS session as typed `client.software_inventory` batches, capped at 48 KiB and 100 entries per batch. A matching `server.ack` acknowledges each batch. The client sends a full initial scan, then reports an unchanged digest without resending entries when nothing changed. It scans every six hours by default. Configure `--software-inventory-interval-seconds` or `LABGUARD_SOFTWARE_INVENTORY_INTERVAL_SECONDS`; allowed values are 300 seconds to 7 days. The same CLI option/environment variable is used by service preparation, and older service configuration files default to six hours. A server-issued `server.software_inventory.refresh` event triggers an immediate full scan. Inventory collection runs in a worker thread and failures do not interrupt heartbeat handling.
 
 Manual Windows inventory verification: install and approve a disposable test device, start the service, and wait for its initial collection to appear in the dashboard. Compare a few entries against Windows Installed Apps or the uninstall registry. While the device is online, request a refresh from its Software tab and confirm the last-success time advances. To inspect per-user behavior, test once with a user hive loaded and once with it unloaded; loaded, accessible hives should be collected, unloaded profiles are omitted, and access-denied keys should appear as partial collection health. These checks require an actual Windows host and are not covered by the platform-independent unit suite.
+
+## Individual software jobs (v0.6)
+
+The agent accepts only server-approved, exact catalog package IDs over its existing authenticated WSS session. WinGet is fixed to its community source. Chocolatey requires the server's configured `CHOCOLATEY_SOURCE_URL`. Package manager invocations use fixed argument lists, no shell, bounded runtime/output, and a durable job journal. A fresh inventory scan verifies the requested install/uninstall before the agent reports success.
+
+Machine-scope jobs require an elevated administrator or LocalSystem. USER-scope WinGet jobs are refused in Session 0 under LocalSystem or any custom service account; they are supported only in a foreground interactive process. LabGuard does not impersonate a user or launch a helper. Chocolatey is machine-only. Tests use mocked subprocesses. Real WinGet/Chocolatey execution and Windows service context remain unverified; see `../docs/LabGuard_Development_State.md` for outstanding manual verification.

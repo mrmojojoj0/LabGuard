@@ -313,7 +313,7 @@ def create_software_catalog_package(body: SoftwareCatalogPackageCreate,
         raise HTTPException(status_code=409, detail={"code": "package_exists", "message": "This package is already in the catalog"})
     package = SoftwareCatalogPackage(**body.model_dump(), source=(
         "WINGET_COMMUNITY" if body.package_manager == "WINGET" else "CHOCO_CONFIGURED"),
-        approved=False, created_by=admin.id)
+        approved=False, approval_status="PENDING", created_by=admin.id)
     db.add(package)
     audit(db, admin.id, "software.catalog.create", "software_package", str(package.id),
           {"package_id": package.package_id, "package_manager": package.package_manager})
@@ -334,6 +334,7 @@ def approve_software_catalog_package(package_id: UUID, request: Request,
         raise HTTPException(status_code=503, detail={"code": "chocolatey_source_unconfigured", "message": "Configure CHOCOLATEY_SOURCE_URL before approving Chocolatey packages"})
     if not package.approved:
         package.approved = True
+        package.approval_status = "APPROVED"
         package.approved_at = now_utc()
         audit(db, admin.id, "software.catalog.approve", "software_package", str(package.id),
               {"package_id": package.package_id, "package_manager": package.package_manager})
@@ -350,7 +351,28 @@ def revoke_software_catalog_package(package_id: UUID, admin=Depends(require_role
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Catalog package not found"})
     if package.approved:
         package.approved = False
+        package.approval_status = "REVOKED"
+        package.approved_at = None
         audit(db, admin.id, "software.catalog.revoke", "software_package", str(package.id),
+              {"package_id": package.package_id, "package_manager": package.package_manager})
+        db.commit()
+    return catalog_out(package)
+
+
+@router.post("/software/catalog/{package_id}/reject")
+def reject_software_catalog_package(package_id: UUID,
+                                    admin=Depends(require_role("SUPER_ADMIN", csrf=True)),
+                                    db: Session = Depends(get_db)):
+    package = db.scalar(select(SoftwareCatalogPackage).where(
+        SoftwareCatalogPackage.id == package_id).with_for_update())
+    if package is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Catalog package not found"})
+    if package.approved:
+        raise HTTPException(status_code=409, detail={"code": "package_already_approved", "message": "Revoke approval before rejecting this package"})
+    if package.approval_status != "REJECTED":
+        package.approval_status = "REJECTED"
+        package.approved_at = None
+        audit(db, admin.id, "software.catalog.reject", "software_package", str(package.id),
               {"package_id": package.package_id, "package_manager": package.package_manager})
         db.commit()
     return catalog_out(package)

@@ -38,6 +38,7 @@ export function SoftwareCatalogAdmin() {
   });
   const approve = useMutation({ mutationFn: softwareApi.approveCatalogPackage, onSuccess: () => { invalidate(); toast("Package approved."); }, onError: (error: Error) => toast(error.message, "error") });
   const revoke = useMutation({ mutationFn: softwareApi.revokeCatalogPackage, onSuccess: () => { invalidate(); toast("Package approval revoked."); }, onError: (error: Error) => toast(error.message, "error") });
+  const reject = useMutation({ mutationFn: softwareApi.rejectCatalogPackage, onSuccess: () => { invalidate(); toast("Package rejected and kept out of the deployment catalog."); }, onError: (error: Error) => toast(error.message, "error") });
   if (admin?.role !== "SUPER_ADMIN") return null;
   const toggleScope = (value: "MACHINE" | "USER") => setScopes((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
   return <>
@@ -63,10 +64,10 @@ export function SoftwareCatalogAdmin() {
       <div className="my-3 flex flex-wrap gap-2"><input className={inputClass} aria-label="Search catalog entries" placeholder="Search name or package ID" value={search} onChange={(event) => setSearch(event.target.value)} /><select className={inputClass} aria-label="Filter catalog manager" value={managerFilter} onChange={(event) => setManagerFilter(event.target.value as typeof managerFilter)}><option value="ALL">All managers</option><option value="WINGET">WinGet</option><option value="CHOCO">Chocolatey</option></select></div>
       {catalog.isError && <QueryError error={catalog.error} />}
       {catalog.isLoading ? <Loading label="Loading package catalog…" /> : <div className="divide-y divide-[var(--color-border)]">{(catalog.data ?? []).map((pkg) => <div className="flex flex-wrap items-center justify-between gap-3 py-3" key={pkg.id}>
-        <div><strong className="block text-[11px] text-[var(--color-foreground)]">{pkg.display_name}</strong><span className="text-[9px] text-[var(--color-muted)]">{pkg.package_id} · {pkg.package_manager} · {pkg.source} · {pkg.version_policy}{pkg.approved_version ? ` ${pkg.approved_version}` : ""}</span><span className="block text-[9px] text-[var(--color-muted)]">{pkg.publisher || "Publisher unavailable"} · {pkg.approved ? "Approved" : "Awaiting approval"}</span></div>
-        {pkg.approved ? <Button className="border-red-200 text-red-700" disabled={revoke.isPending} onClick={() => revoke.mutate(pkg.id)}>Revoke approval</Button> : <Button disabled={approve.isPending} onClick={() => approve.mutate(pkg.id)}>Approve package</Button>}
+        <div className="min-w-0"><strong className="block text-[11px] text-[var(--color-foreground)]">{pkg.display_name}</strong><span className="text-[9px] text-[var(--color-muted)]">{pkg.package_id} · {pkg.package_manager} · {pkg.source} · {pkg.version_policy}{pkg.approved_version ? ` ${pkg.approved_version}` : ""}</span><span className="block text-[9px] text-[var(--color-muted)]">{pkg.publisher || "Publisher unavailable"} · Scopes: {pkg.supported_scopes.join(", ")}</span>{pkg.description && <span className="block max-w-3xl text-[9px] text-[var(--color-muted)]">{pkg.description}</span>}<span className="block text-[9px] font-semibold text-[var(--color-muted)]">Review status: {pkg.approval_status}</span></div>
+        <div className="flex gap-2">{pkg.approved ? <Button className="border-red-200 text-red-700" disabled={revoke.isPending} onClick={() => revoke.mutate(pkg.id)}>Revoke approval</Button> : <><Button disabled={approve.isPending} onClick={() => approve.mutate(pkg.id)}>Approve package</Button>{pkg.approval_status !== "REJECTED" && <Button className="border-red-200 text-red-700" disabled={reject.isPending} onClick={() => reject.mutate(pkg.id)}>Reject</Button>}</>}</div>
       </div>)}</div>}
-      {(approve.isError || revoke.isError) && <p role="alert" className="mt-2 text-[10px] text-red-700">{approve.error?.message ?? revoke.error?.message}</p>}
+      {(approve.isError || revoke.isError || reject.isError) && <p role="alert" className="mt-2 text-[10px] text-red-700">{approve.error?.message ?? revoke.error?.message ?? reject.error?.message}</p>}
     </Panel>
   </>;
 }

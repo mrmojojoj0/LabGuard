@@ -29,8 +29,10 @@ export function DeviceSoftware({ id }: { id: string }) {
     <PanelTitle aside={canManageLabs(admin?.role) ? <Button disabled={refresh.isPending} onClick={() => refresh.mutate()}><RefreshCw size={13} className={refresh.isPending ? "animate-spin" : ""}/>{refresh.isPending ? "Requesting…" : "Refresh inventory"}</Button> : undefined}>Installed software</PanelTitle>
     <div className="my-3 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg bg-[var(--color-surface-subtle)] p-3 text-[10px]">
       <span><b className="text-[var(--color-foreground)]">Collection:</b> <span className="text-[var(--color-muted)]">{collection?.status ?? "Loading"}</span></span>
+      <span><b className="text-[var(--color-foreground)]">Last attempt:</b> <span className="text-[var(--color-muted)]">{collection?.last_attempt_at ? new Date(collection.last_attempt_at).toLocaleString() : "Never"}</span></span>
       <span><b className="text-[var(--color-foreground)]">Last successful:</b> <span className="text-[var(--color-muted)]">{successfulAt ? new Date(successfulAt).toLocaleString() : "Never"}</span></span>
-      <span className={`font-semibold ${stale ? "text-amber-600" : "text-emerald-600"}`}>{stale ? "Stale inventory" : collection?.status === "NEVER" ? "No inventory yet" : "Current"}</span>
+      <span><b className="text-[var(--color-foreground)]">Last complete:</b> <span className="text-[var(--color-muted)]">{collection?.last_complete_at ? new Date(collection.last_complete_at).toLocaleString() : "Never"}</span></span>
+      <span className={`font-semibold ${stale ? "text-amber-600" : "text-emerald-600"}`}>{stale ? "Stale inventory" : collection?.status === "NEVER" ? "No inventory yet" : collection?.status === "FAILED" ? "Latest attempt failed; showing last successful snapshot" : collection?.status === "PARTIAL" ? "Current partial inventory" : "Current"}</span>
       {Boolean(collection?.errors.length) && <span className="text-amber-700">Partial collection: {collection?.errors.join(", ")}</span>}
     </div>
     {result.isError && <QueryError error={result.error}/>}

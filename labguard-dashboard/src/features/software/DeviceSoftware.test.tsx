@@ -16,7 +16,7 @@ function renderPanel() {
 beforeEach(() => {
   mocks.role.value = "LAB_ADMIN";
   mocks.device.mockResolvedValue({
-    device_id: "device-1", collection: { status: "COMPLETE", last_successful_at: "2026-11-01T00:00:00Z", started_at: null, completed_at: null, discovered_count: 1, errors: [], stale: false },
+    device_id: "device-1", collection: { status: "COMPLETE", last_attempt_status: "COMPLETE", last_attempt_at: "2026-11-01T00:00:00Z", last_successful_at: "2026-11-01T00:00:00Z", last_complete_at: "2026-11-01T00:00:00Z", started_at: null, completed_at: null, discovered_count: 1, errors: [], stale: false },
     items: [{ id: "row-1", device_id: "device-1", software_key: "a".repeat(64), entry_key: "b".repeat(64), name: "Editor", version: "1.2", publisher: "Acme", architecture: "x64", install_date: null, install_location: null, package_id: null, source: "WINDOWS_REGISTRY", installation_scope: "MACHINE", first_seen_at: "", last_seen_at: "" }],
     total: 1, offset: 0, limit: 100,
   });
@@ -40,5 +40,17 @@ describe("device software inventory", () => {
     renderPanel();
     await screen.findByText("Editor");
     expect(screen.queryByRole("button", { name: /refresh inventory/i })).toBeNull();
+  });
+
+  it("presents partial registry results as successful and distinguishes the last complete collection", async () => {
+    mocks.device.mockResolvedValueOnce({
+      device_id: "device-1", collection: { status: "PARTIAL", last_attempt_status: "PARTIAL", last_attempt_at: "2026-11-05T00:00:00Z", last_successful_at: "2026-11-05T00:00:00Z", last_complete_at: null, started_at: null, completed_at: null, discovered_count: 1, errors: ["winget_timeout"], stale: false },
+      items: [{ id: "row-1", device_id: "device-1", software_key: "a".repeat(64), entry_key: "b".repeat(64), name: "Editor", version: "1.2", publisher: "Acme", architecture: "UNKNOWN", install_date: null, install_location: null, package_id: null, source: "WINDOWS_REGISTRY", installation_scope: "MACHINE", first_seen_at: "", last_seen_at: "" }],
+      total: 1, offset: 0, limit: 100,
+    });
+    renderPanel();
+    expect(await screen.findByText("Current partial inventory")).toBeTruthy();
+    expect(screen.getByText(/Last successful:/).parentElement?.textContent).not.toContain("Never");
+    expect(screen.getByText(/Last complete:/).parentElement?.textContent).toContain("Never");
   });
 });

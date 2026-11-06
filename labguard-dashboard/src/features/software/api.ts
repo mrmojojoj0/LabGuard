@@ -46,6 +46,8 @@ export const softwareApi = {
     api<SoftwareCatalogPackage>(`/software/catalog/${id}/approve`, json("POST", {})),
   revokeCatalogPackage: (id: string) =>
     api<SoftwareCatalogPackage>(`/software/catalog/${id}/revoke`, json("POST", {})),
+  rejectCatalogPackage: (id: string) =>
+    api<SoftwareCatalogPackage>(`/software/catalog/${id}/reject`, json("POST", {})),
   createJob: (deviceId: string, body: {
     action: "INSTALL" | "UNINSTALL"; catalog_package_id: string;
     installation_scope?: "MACHINE" | "USER"; version?: string;
