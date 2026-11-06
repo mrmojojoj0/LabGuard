@@ -10,7 +10,7 @@ export default defineConfig(({ mode }) => {
     server: {
       host: env.LABGUARD_DASHBOARD_HOST || '127.0.0.1',
       port: Number(env.LABGUARD_DASHBOARD_PORT || 5173),
-      proxy: { '/api': { target: env.LABGUARD_API_PROXY_TARGET || 'http://127.0.0.1:8000', changeOrigin: true } },
+      proxy: { '/api': { target: env.LABGUARD_API_PROXY_TARGET || 'http://192.168.0.13:8000', changeOrigin: true } },
     },
     test: { environment: 'jsdom' },
   }
