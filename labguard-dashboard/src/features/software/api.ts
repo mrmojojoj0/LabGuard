@@ -1,5 +1,5 @@
 import { api, json } from "../../lib/api";
-import type { SoftwareAggregatePage, SoftwareCatalogPackage, SoftwareCollectionStatus, SoftwareJobsPage, SoftwarePageResult, SoftwareSummary, SoftwareJob, WingetDiscoveryResult, WingetDiscoveryStatus } from "../../lib/types";
+import type { SoftwareAggregatePage, SoftwareCatalogPackage, SoftwareCollectionStatus, SoftwareJobsPage, SoftwarePageResult, SoftwareSummary, SoftwareJob, WingetDiscoveryResult, WingetDiscoveryStatus, WingetPackageDetails } from "../../lib/types";
 
 export interface SoftwareFilters {
   search?: string;
@@ -43,6 +43,8 @@ export const softwareApi = {
     api<{ source: string; winget_version: string; results: WingetDiscoveryResult[] }>(
       `/software/discovery/search?query=${encodeURIComponent(search)}&source=${encodeURIComponent(source)}`,
     ),
+  wingetPackageDetails: (packageId: string) =>
+    api<WingetPackageDetails>(`/software/discovery/package/${encodeURIComponent(packageId)}`),
   importWingetPackage: (body: { package_id: string; source: string; supported_scopes: Array<"MACHINE" | "USER"> }) =>
     api<{ package: SoftwareCatalogPackage; created: boolean }>("/software/discovery/import", json("POST", body)),
   createCatalogPackage: (body: {
@@ -57,9 +59,14 @@ export const softwareApi = {
   rejectCatalogPackage: (id: string) =>
     api<SoftwareCatalogPackage>(`/software/catalog/${id}/reject`, json("POST", {})),
   createJob: (deviceId: string, body: {
-    action: "INSTALL" | "UNINSTALL"; catalog_package_id: string;
-    installation_scope?: "MACHINE" | "USER"; version?: string;
-    inventory_item_id?: string; expires_in_seconds?: number;
+    action: "INSTALL"; package_manager: "WINGET"; package_id: string; source: "winget";
+    installation_scope: "MACHINE" | "USER"; version?: string; expires_in_seconds?: number;
+  } | {
+    action: "INSTALL"; catalog_package_id: string; installation_scope?: "MACHINE" | "USER";
+    version?: string; expires_in_seconds?: number;
+  } | {
+    action: "UNINSTALL"; inventory_item_id: string; catalog_package_id?: string;
+    installation_scope?: "MACHINE" | "USER"; expires_in_seconds?: number;
   }) => api<SoftwareJob>(`/devices/${deviceId}/software/jobs`, json("POST", body)),
   jobs: (deviceId?: string) => api<SoftwareJobsPage>(
     deviceId ? `/devices/${deviceId}/software/jobs?limit=100` : "/software/jobs?limit=100",

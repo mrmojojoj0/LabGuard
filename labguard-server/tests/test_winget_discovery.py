@@ -24,8 +24,8 @@ def test_parse_search_output_handles_aligned_columns_and_missing_match():
     assert len(single_source) == 1
     assert single_source[0].source == "winget"
     assert [package.as_dict() for package in packages] == [
-        {"name": "Mozilla Firefox", "package_id": "Mozilla.Firefox", "version": "132.0", "source": "winget"},
-        {"name": "Visual Studio Code", "package_id": "Microsoft.VisualStudioCode", "version": "1.95.3", "source": "winget"},
+        {"name": "Mozilla Firefox", "package_id": "Mozilla.Firefox", "version": "132.0", "source": "winget", "publisher": None},
+        {"name": "Visual Studio Code", "package_id": "Microsoft.VisualStudioCode", "version": "1.95.3", "source": "winget", "publisher": None},
     ]
 
 
@@ -46,9 +46,34 @@ Description:
 Homepage: https://code.visualstudio.com/
 """
     assert discovery.parse_show_output(output) == {
+        "package_id": "Microsoft.VisualStudioCode", "version": "1.95.3",
         "display_name": "Visual Studio Code", "publisher": "Microsoft Corporation",
         "description": "Code editing. Redefined. Build and debug modern web and cloud applications.",
     }
+
+
+def test_exact_show_validates_package_id_and_selected_version(monkeypatch):
+    calls = []
+    monkeypatch.setattr(discovery, "locate_winget", lambda: "C:/fake/winget.exe")
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0,
+            stdout="Found Example Editor [Vendor.Editor]\nVersion: 2.4.1\nPublisher: Vendor\n", stderr="")
+
+    monkeypatch.setattr(discovery.subprocess, "run", run)
+    metadata = discovery.get_winget_package_metadata("Vendor.Editor", "winget", "2.4.1")
+    assert metadata["package_id"] == "Vendor.Editor"
+    assert metadata["version"] == "2.4.1"
+    assert calls[0][1:] == ["show", "--id", "Vendor.Editor", "--exact", "--source", "winget",
+                             "--version", "2.4.1", "--accept-source-agreements", "--disable-interactivity"]
+
+    def mismatched(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout="Found Other App [Other.App]\nVersion: 2.4.1\n", stderr="")
+
+    monkeypatch.setattr(discovery.subprocess, "run", mismatched)
+    with pytest.raises(discovery.WingetDiscoveryError, match="different package identity"):
+        discovery.get_winget_package_metadata("Vendor.Editor")
 
 
 def test_parse_source_output_returns_names_without_exposing_source_addresses():

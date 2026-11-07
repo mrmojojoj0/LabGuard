@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, inspect
 from sqlalchemy import select
 
 from labguard_client.identity import DeviceIdentity
-from labguard_server.models import AuditEvent, SoftwareJob
+from labguard_server.models import AuditEvent, SoftwareInventoryItem, SoftwareJob
 from labguard_server.schemas import SoftwareJobEventIn
 from labguard_server.software_jobs import dispatch_software_job, record_software_job_event
 from tests.conftest import login
@@ -31,6 +31,7 @@ def test_software_jobs_migration_downgrade_and_upgrade_sqlite(tmp_path, monkeypa
         assert "software_jobs" in inspect(connection).get_table_names()
         assert "job_id" in {column["name"] for column in inspect(connection).get_columns("software_inventory_collections")}
         assert "approval_status" in {column["name"] for column in inspect(connection).get_columns("software_catalog_packages")}
+        assert "discovery_sources" in {column["name"] for column in inspect(connection).get_columns("software_inventory_items")}
 
 
 def enrolled_device(client, name="SOFTWARE-JOBS-PC"):
@@ -119,6 +120,141 @@ def test_job_rejects_unapproved_package_and_invalid_identifiers(client):
         "supported_scopes": ["MACHINE"],
     })
     assert invalid.status_code == 422
+
+
+def test_uninstall_job_requires_authorization_and_exact_present_package(client):
+    device_id = enrolled_device(client, "UNINSTALL-PC")
+    package_id = approved_package(client)
+    with client.app.state.session_factory() as db:
+        item = SoftwareInventoryItem(device_id=device_id, entry_key="a" * 64, product_key="b" * 64,
+            name="Example Editor", version="1.0", publisher="Example Corp", architecture="x64",
+            install_date=None, install_location=None, package_id="Example.Editor", source="WINGET",
+            discovery_sources=["WINGET", "WINDOWS_REGISTRY"], installation_scope="MACHINE",
+            is_present=True, missing_since=None)
+        db.add(item)
+        db.commit()
+        item_id = item.id
+    viewer_csrf = login(client, "viewer", "viewer-password-123")
+    denied = client.post(f"/api/v1/devices/{device_id}/software/jobs",
+        headers={"X-CSRF-Token": viewer_csrf}, json={"action": "UNINSTALL",
+            "catalog_package_id": package_id, "inventory_item_id": str(item_id),
+            "installation_scope": "MACHINE"})
+    assert denied.status_code == 403
+    csrf = login(client)
+    accepted = client.post(f"/api/v1/devices/{device_id}/software/jobs",
+        headers={"X-CSRF-Token": csrf}, json={"action": "UNINSTALL",
+            "catalog_package_id": package_id, "inventory_item_id": str(item_id),
+            "installation_scope": "MACHINE"})
+    assert accepted.status_code == 202, accepted.text
+    assert accepted.json()["action"] == "UNINSTALL"
+    assert accepted.json()["status"] == "PENDING"
+    with client.app.state.session_factory() as db:
+        job = db.get(SoftwareJob, UUID(accepted.json()["id"]))
+        assert job is not None and job.package_id == "Example.Editor"
+        assert job.installation_scope == "MACHINE"
+
+
+def test_uninstall_rejects_unmatched_registry_item(client):
+    device_id = enrolled_device(client, "UNINSTALL-UNSUPPORTED-PC")
+    package_id = approved_package(client)
+    with client.app.state.session_factory() as db:
+        item = SoftwareInventoryItem(device_id=device_id, entry_key="c" * 64, product_key="d" * 64,
+            name="Unknown Registry App", version="1.0", publisher=None, architecture="UNKNOWN",
+            install_date=None, install_location=None, package_id=None, source="WINDOWS_REGISTRY",
+            discovery_sources=["WINDOWS_REGISTRY"], installation_scope="MACHINE", is_present=True)
+        db.add(item)
+        db.commit()
+        item_id = item.id
+    csrf = login(client)
+    response = client.post(f"/api/v1/devices/{device_id}/software/jobs",
+        headers={"X-CSRF-Token": csrf}, json={"action": "UNINSTALL",
+            "catalog_package_id": package_id, "inventory_item_id": str(item_id),
+            "installation_scope": "MACHINE"})
+    assert response.status_code == 409
+    assert "uninstall_unsupported" in response.text
+
+
+def test_direct_winget_install_validates_identity_persists_audits_and_queues_offline(client, monkeypatch):
+    device_id = enrolled_device(client, "DIRECT-WINGET-PC")
+    monkeypatch.setattr("labguard_server.api.get_winget_package_metadata", lambda package_id, source, version=None: {
+        "display_name": "Vendor Editor", "package_id": "Vendor.Editor", "version": "4.2.0",
+        "publisher": "Vendor Inc", "description": None,
+    })
+    headers = {"X-CSRF-Token": login(client)}
+    response = client.post(f"/api/v1/devices/{device_id}/software/jobs", headers=headers, json={
+        "action": "INSTALL", "package_manager": "WINGET", "package_id": "Vendor.Editor",
+        "source": "winget", "version": "4.2.0", "installation_scope": "MACHINE",
+    })
+    assert response.status_code == 202, response.text
+    job_id = UUID(response.json()["id"])
+    assert response.json()["status"] == "PENDING"
+    assert response.json()["catalog_package_id"] is None
+    with client.app.state.session_factory() as db:
+        job = db.get(SoftwareJob, job_id)
+        audit = db.scalar(select(AuditEvent).where(AuditEvent.action == "software.job_requested"))
+        assert job.package_id == "Vendor.Editor" and job.package_manager == "WINGET"
+        assert job.source == "WINGET_COMMUNITY" and job.requested_version == "4.2.0"
+        assert job.catalog_package_id is None and audit is not None
+
+
+def test_direct_winget_install_rejects_invalid_source_identity_and_role(client, monkeypatch):
+    device_id = enrolled_device(client, "DIRECT-WINGET-VALIDATION-PC")
+    monkeypatch.setattr("labguard_server.api.get_winget_package_metadata", lambda *args: {
+        "display_name": "Vendor Editor", "package_id": "Vendor.Editor", "version": "4.2.0",
+        "publisher": "Vendor Inc", "description": None,
+    })
+    base = {"action": "INSTALL", "package_manager": "WINGET", "package_id": "Vendor.Editor",
+            "source": "winget", "installation_scope": "MACHINE"}
+    viewer = {"X-CSRF-Token": login(client, "viewer", "viewer-password-123")}
+    forbidden = client.post(f"/api/v1/devices/{device_id}/software/jobs", headers=viewer, json=base)
+    assert forbidden.status_code == 403
+    headers = {"X-CSRF-Token": login(client)}
+    invalid_source = client.post(f"/api/v1/devices/{device_id}/software/jobs", headers=headers,
+        json={**base, "source": "msstore"})
+    assert invalid_source.status_code == 422
+    invalid_id = client.post(f"/api/v1/devices/{device_id}/software/jobs", headers=headers,
+        json={**base, "package_id": "../bad.exe"})
+    assert invalid_id.status_code == 422
+    wrong_search_identity = client.post(f"/api/v1/devices/{device_id}/software/jobs", headers=headers,
+        json={**base, "package_id": "Other.Package"})
+    assert wrong_search_identity.status_code == 422
+    assert client.post(f"/api/v1/devices/{device_id}/software/jobs", headers=headers,
+        json={**base, "installation_scope": "SYSTEM"}).status_code == 422
+
+
+def test_direct_uninstall_uses_exact_inventory_identity_without_catalog(client):
+    device_id = enrolled_device(client, "DIRECT-UNINSTALL-PC")
+    with client.app.state.session_factory() as db:
+        item = SoftwareInventoryItem(device_id=device_id, entry_key="e" * 64, product_key="f" * 64,
+            name="Example Editor", version="1.0", publisher="Vendor", architecture="x64",
+            install_date=None, install_location=None, package_id="Example.Editor", source="WINGET",
+            discovery_sources=["WINDOWS_REGISTRY", "WINGET"], installation_scope="MACHINE",
+            is_present=True, missing_since=None)
+        db.add(item)
+        db.commit()
+        item_id = item.id
+    response = client.post(f"/api/v1/devices/{device_id}/software/jobs",
+        headers={"X-CSRF-Token": login(client)}, json={
+            "action": "UNINSTALL", "inventory_item_id": str(item_id),
+        })
+    assert response.status_code == 202, response.text
+    assert response.json()["package_id"] == "Example.Editor"
+    assert response.json()["catalog_package_id"] is None
+
+    with client.app.state.session_factory() as db:
+        unknown_scope = SoftwareInventoryItem(device_id=device_id, entry_key="1" * 64, product_key="2" * 64,
+            name="Unknown Scope App", version="1.0", publisher="Vendor", architecture="UNKNOWN",
+            install_date=None, install_location=None, package_id="Vendor.Unknown", source="WINGET",
+            discovery_sources=["WINGET"], installation_scope="UNKNOWN", is_present=True, missing_since=None)
+        db.add(unknown_scope)
+        db.commit()
+        unknown_id = unknown_scope.id
+    rejected = client.post(f"/api/v1/devices/{device_id}/software/jobs",
+        headers={"X-CSRF-Token": login(client)}, json={
+            "action": "UNINSTALL", "inventory_item_id": str(unknown_id),
+        })
+    assert rejected.status_code == 409
+    assert "uninstall_unsupported" in rejected.text
 
 
 def test_catalog_mutations_require_super_admin_csrf(client):

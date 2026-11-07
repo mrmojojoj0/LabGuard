@@ -31,11 +31,12 @@ def enroll(client, name):
     return UUID(identity.device_id), identity
 
 
-def entry(name, version="1.0", publisher="Publisher", *, source="WINDOWS_REGISTRY", scope="MACHINE"):
+def entry(name, version="1.0", publisher="Publisher", *, source="WINDOWS_REGISTRY", scope="MACHINE",
+          discovery_sources=None, package_id=None):
     key = hashlib.sha256(f"{name.lower()}|{publisher.lower()}|{scope}".encode()).hexdigest()
     return SoftwareInventoryEntryIn(entry_key=key, name=name, version=version, publisher=publisher,
         architecture="x64", install_date="2025-01-30", install_location="C:\\Program Files\\App",
-        package_id=None, source=source, installation_scope=scope)
+        package_id=package_id, source=source, discovery_sources=discovery_sources or [], installation_scope=scope)
 
 
 def batch(collection_id, index, count, entries, status="COMPLETE", *, digest_value="a" * 64,
@@ -117,6 +118,20 @@ def test_unchanged_report_refreshes_health_without_resending_items(client):
         assert inventory_status(db, device_id)["status"] == "UNCHANGED"
         assert db.scalar(select(SoftwareInventoryCollection).where(SoftwareInventoryCollection.device_id == device_id,
             SoftwareInventoryCollection.status == "UNCHANGED")) is not None
+
+
+def test_inventory_source_provenance_survives_database_and_api_serialization(client):
+    device_id, _ = enroll(client, "INVENTORY-SOURCE-PC")
+    item = entry("Mozilla Firefox", source="WINGET", package_id="Mozilla.Firefox",
+        discovery_sources=["WINDOWS_REGISTRY", "WINGET"])
+    submit(client, device_id, 1, batch(uuid4(), 0, 1, [item]))
+    with client.app.state.session_factory() as db:
+        results, count = device_software_items(db, device_id)
+        assert count == 1
+        assert results[0]["source"] == "WINGET"
+        assert results[0]["discovery_sources"] == ["WINDOWS_REGISTRY", "WINGET"]
+        row = db.scalar(select(SoftwareInventoryItem).where(SoftwareInventoryItem.device_id == device_id))
+        assert row is not None and row.discovery_sources == ["WINDOWS_REGISTRY", "WINGET"]
 
 
 def test_inventory_ingest_throttle_returns_retry_time_separate_from_refresh_cooldown(client):

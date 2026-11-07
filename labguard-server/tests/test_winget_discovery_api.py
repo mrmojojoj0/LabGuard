@@ -10,7 +10,7 @@ def login(client, username="admin", password="correct-horse-battery-staple"):
     return response.json()["csrf_token"]
 
 
-def test_discovery_search_is_super_admin_only_and_returns_repository_results(client, monkeypatch):
+def test_discovery_search_is_lab_admin_only_and_returns_fixed_source_results(client, monkeypatch):
     calls = []
 
     def search(query, source):
@@ -28,8 +28,12 @@ def test_discovery_search_is_super_admin_only_and_returns_repository_results(cli
     assert result.json() == {
         "source": "winget", "winget_version": "v1.9.0",
         "results": [{"name": "Firefox", "package_id": "Mozilla.Firefox", "version": "132.0",
-                     "source": "winget", "catalog_status": None}],
+                     "source": "winget", "publisher": None}],
     }
+    assert calls == [("Firefox", "winget")]
+
+    invalid_source = client.get("/api/v1/software/discovery/search?query=Firefox&source=msstore")
+    assert invalid_source.status_code == 422
     assert calls == [("Firefox", "winget")]
 
 
@@ -83,3 +87,19 @@ def test_discovery_import_rejects_bad_package_id_before_calling_winget(client, m
     })
     assert response.status_code == 422
     assert called is False
+
+
+def test_package_details_requires_lab_admin_and_returns_exact_metadata(client, monkeypatch):
+    monkeypatch.setattr("labguard_server.api.get_winget_package_metadata", lambda package_id, source: {
+        "display_name": "Mozilla Firefox", "package_id": package_id, "version": "132.0",
+        "publisher": "Mozilla", "description": None,
+    })
+    viewer_csrf = login(client, "viewer", "viewer-password-123")
+    denied = client.get("/api/v1/software/discovery/package/Mozilla.Firefox",
+        headers={"X-CSRF-Token": viewer_csrf})
+    assert denied.status_code == 403
+    login(client)
+    result = client.get("/api/v1/software/discovery/package/Mozilla.Firefox")
+    assert result.status_code == 200
+    assert result.json() == {"display_name": "Mozilla Firefox", "package_id": "Mozilla.Firefox",
+        "version": "132.0", "publisher": "Mozilla", "description": None, "source": "winget"}

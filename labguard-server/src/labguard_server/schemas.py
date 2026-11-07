@@ -51,6 +51,24 @@ class DeviceOut(BaseModel):
     agent_version: str | None
 
 
+class RdpAccessRequestOut(BaseModel):
+    id: UUID
+    device_id: UUID
+    hostname: str
+    status: Literal["PENDING", "READY", "FAILED", "EXPIRED"]
+    error_code: str | None
+    created_at: datetime
+    expires_at: datetime
+    access_expires_at: datetime
+
+
+class RdpAccessResultIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+    status: Literal["READY", "FAILED"]
+    error_code: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[a-z0-9_:-]+$")
+
+
 class RoomCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=500)
@@ -199,6 +217,7 @@ class SoftwareInventoryEntryIn(BaseModel):
     install_location: StrictStr | None = Field(default=None, max_length=1024)
     package_id: StrictStr | None = Field(default=None, max_length=256)
     source: Literal["WINDOWS_REGISTRY", "WINGET", "CHOCO"]
+    discovery_sources: list[Literal["WINDOWS_REGISTRY", "WINGET", "CHOCO"]] = Field(default_factory=list, max_length=3)
     installation_scope: Literal["MACHINE", "USER", "UNKNOWN"]
 
     @field_validator("install_date")
@@ -286,7 +305,12 @@ class WingetCatalogImport(BaseModel):
 class SoftwareJobCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     action: Literal["INSTALL", "UNINSTALL"]
-    catalog_package_id: UUID
+    catalog_package_id: UUID | None = None
+    package_manager: Literal["WINGET"] | None = None
+    package_id: StrictStr | None = Field(default=None, min_length=1, max_length=256,
+                                           pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
+    source: StrictStr | None = Field(default=None, min_length=1, max_length=64,
+                                     pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
     installation_scope: Literal["MACHINE", "USER"] = "MACHINE"
     version: StrictStr | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
     inventory_item_id: UUID | None = None
@@ -294,10 +318,21 @@ class SoftwareJobCreate(BaseModel):
 
     @model_validator(mode="after")
     def action_parameters_match(self):
-        if self.action == "INSTALL" and self.inventory_item_id is not None:
-            raise ValueError("install jobs cannot specify an inventory item")
-        if self.action == "UNINSTALL" and (self.inventory_item_id is None or self.version is not None):
-            raise ValueError("uninstall jobs require an inventory item and do not accept a version")
+        if self.action == "INSTALL":
+            if self.inventory_item_id is not None:
+                raise ValueError("install jobs cannot specify an inventory item")
+            direct_fields = (self.package_manager, self.package_id, self.source)
+            if self.catalog_package_id is None and any(value is None for value in direct_fields):
+                raise ValueError("install jobs require a catalog package or a complete direct WinGet identity")
+            if self.catalog_package_id is not None and any(value is not None for value in direct_fields):
+                raise ValueError("catalog and direct package identities cannot be combined")
+            if self.source is not None and self.source.casefold() != "winget":
+                raise ValueError("direct WinGet jobs must use the winget source")
+        if self.action == "UNINSTALL":
+            if self.inventory_item_id is None or self.version is not None:
+                raise ValueError("uninstall jobs require an inventory item and do not accept a version")
+            if any(value is not None for value in (self.package_manager, self.package_id, self.source)):
+                raise ValueError("uninstall identity is derived from the selected inventory item")
         return self
 
 

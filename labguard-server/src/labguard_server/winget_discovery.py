@@ -28,6 +28,7 @@ class WingetPackage:
     package_id: str
     version: str | None
     source: str
+    publisher: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -104,7 +105,7 @@ def _table_columns(header: str, required: set[str] | None = None) -> list[tuple[
     required = required or {"name", "id", "version", "source"}
     if not required.issubset(names):
         return None
-    if any(name not in {"name", "id", "version", "match", "source", "argument", "explicit"} for name in names):
+    if any(name not in {"name", "id", "version", "publisher", "match", "source", "argument", "explicit"} for name in names):
         return None
     return [(match.group(), match.start()) for match in matches]
 
@@ -135,7 +136,8 @@ def parse_search_output(output: str, source: str = "winget") -> list[WingetPacka
             if not name or not package_source:
                 continue
             packages.append(WingetPackage(name=name, package_id=package_id,
-                                          version=value_by_field.get("version") or None, source=package_source))
+                                          version=value_by_field.get("version") or None, source=package_source,
+                                          publisher=value_by_field.get("publisher") or None))
         return packages
     if re.search(r"no package found|no installed package found", output, re.IGNORECASE):
         return []
@@ -191,18 +193,22 @@ def search_winget_packages(query: str, source: str = "winget") -> tuple[str, lis
 
 def parse_show_output(output: str) -> dict[str, str | None]:
     """Extract the metadata fields WinGet prints as `Label: value` lines."""
-    metadata: dict[str, str | None] = {"display_name": None, "publisher": None, "description": None}
+    metadata: dict[str, str | None] = {"display_name": None, "package_id": None, "version": None,
+                                       "publisher": None, "description": None}
     lines = output.splitlines()
     for index, line in enumerate(lines):
         name_match = re.match(r"^\s*Found\s+(.+?)\s+\[[^\]]+\]\s*$", line, re.IGNORECASE)
         if name_match and metadata["display_name"] is None:
             metadata["display_name"] = name_match.group(1).strip()
-        match = re.match(r"^\s*(Publisher|Description):\s*(.*)\s*$", line, re.IGNORECASE)
+            metadata["package_id"] = re.search(r"\[([^\]]+)\]", line).group(1)
+        match = re.match(r"^\s*(Version|Publisher|Description):\s*(.*)\s*$", line, re.IGNORECASE)
         if not match:
             continue
         field = match.group(1).casefold()
         value = match.group(2).strip()
-        if field == "description" and not value:
+        if field == "version" and value:
+            metadata["version"] = value[:128]
+        elif field == "description" and not value:
             description_lines = []
             for detail in lines[index + 1:]:
                 if not detail.strip() or re.match(r"^\s*[A-Za-z][A-Za-z ]{1,30}:\s*", detail):
@@ -214,16 +220,26 @@ def parse_show_output(output: str) -> dict[str, str | None]:
     return metadata
 
 
-def get_winget_package_metadata(package_id: str, source: str = "winget") -> dict[str, str | None]:
+def get_winget_package_metadata(package_id: str, source: str = "winget",
+                                version: str | None = None) -> dict[str, str | None]:
     if not PACKAGE_ID_RE.fullmatch(package_id):
         raise WingetDiscoveryError("invalid_package_id", "WinGet package identifier is invalid")
     normalized_source = validate_source(source)
     executable = locate_winget()
     if executable is None:
         raise WingetDiscoveryError("winget_unavailable", "WinGet is not available to the LabGuard server process")
-    output = _run(executable, ["show", "--id", package_id, "--exact", "--source", normalized_source,
-                               "--accept-source-agreements", "--disable-interactivity"]).stdout
+    args = ["show", "--id", package_id, "--exact", "--source", normalized_source]
+    if version is not None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", version):
+            raise WingetDiscoveryError("invalid_version", "WinGet package version is invalid")
+        args.extend(["--version", version])
+    args.extend(["--accept-source-agreements", "--disable-interactivity"])
+    output = _run(executable, args).stdout
     metadata = parse_show_output(output)
-    if metadata["display_name"] is None:
+    if metadata["display_name"] is None or metadata["package_id"] is None:
         raise WingetDiscoveryError("winget_unusable_output", "WinGet package details did not include a package name")
+    if metadata["package_id"].casefold() != package_id.casefold():
+        raise WingetDiscoveryError("package_identity_mismatch", "WinGet returned a different package identity")
+    if version is not None and metadata["version"] is not None and metadata["version"] != version:
+        raise WingetDiscoveryError("version_not_found", "WinGet returned a different package version")
     return metadata

@@ -26,7 +26,7 @@ MAX_BATCH_BYTES = 48 * 1024
 
 @dataclass
 class SoftwareInventory:
-    entries: list[dict[str, str | None]]
+    entries: list[dict[str, Any]]
     errors: list[str]
     detected_package_managers: list[str]
 
@@ -82,12 +82,12 @@ def _normalize_architecture(value: str | None) -> str:
 def _make_entry(*, name: str, version: str | None, publisher: str | None,
                 architecture: str | None, install_date: str | None,
                 install_location: str | None, package_id: str | None,
-                source: str, scope: str) -> dict[str, str | None]:
+                source: str, scope: str) -> dict[str, Any]:
     name = name.strip()[:256]
     architecture = _normalize_architecture(architecture)
-    normalized = "\x1f".join((source, scope, (package_id or name).casefold(),
+    normalized = "\x1f".join((source, scope, name.casefold(), (package_id or "").casefold(),
                              (publisher or "").casefold(), (architecture or "UNKNOWN").casefold(),
-                             (install_location or "").casefold()))
+                             (version or "").casefold(), (install_location or "").casefold()))
     return {
         "entry_key": hashlib.sha256(normalized.encode("utf-8", "replace")).hexdigest(),
         "name": name,
@@ -98,12 +98,85 @@ def _make_entry(*, name: str, version: str | None, publisher: str | None,
         "install_location": _clean(install_location, 1024),
         "package_id": _clean(package_id, 256),
         "source": source,
+        "discovery_sources": [source],
         "installation_scope": scope,
     }
 
 
-def _registry_entries(winreg, errors: list[str]) -> list[dict[str, str | None]]:
-    result: dict[str, dict[str, str | None]] = {}
+def _normalized_app_name(value: str) -> str:
+    value = re.sub(r"\s*\((?:x86|x64|arm64|32-bit|64-bit)(?:\s+[a-z]{2}(?:-[A-Z]{2})?)?\)\s*$", "", value, flags=re.I)
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _edition_markers(value: str) -> frozenset[str]:
+    words = set(re.findall(r"[a-z0-9]+", value.casefold()))
+    return frozenset(words.intersection({"esr", "enterprise", "community", "standard", "professional",
+                                        "pro", "home", "education", "ultimate", "server", "developer",
+                                        "nightly", "beta"}))
+
+
+def _can_reconcile(registry: dict[str, Any], winget: dict[str, Any]) -> bool:
+    if _edition_markers(registry["name"]) != _edition_markers(winget["name"]):
+        return False
+    if (registry["installation_scope"] != "UNKNOWN" and winget["installation_scope"] != "UNKNOWN"
+            and registry["installation_scope"] != winget["installation_scope"]):
+        return False
+    if (registry["architecture"] != "UNKNOWN" and winget["architecture"] != "UNKNOWN"
+            and registry["architecture"].casefold() != winget["architecture"].casefold()):
+        return False
+    if registry["version"] and winget["version"] and registry["version"].casefold() != winget["version"].casefold():
+        return False
+    if registry["publisher"] and winget["publisher"] and registry["publisher"].casefold() != winget["publisher"].casefold():
+        return False
+    if registry["package_id"] and winget["package_id"]:
+        return registry["package_id"].casefold() == winget["package_id"].casefold()
+    names_match = _normalized_app_name(registry["name"]) == _normalized_app_name(winget["name"])
+    if not names_match:
+        return False
+    # Exact normalized names need at least one corroborating identity field;
+    # conflicting package IDs, versions, publishers, architecture or scopes were rejected above.
+    return bool((registry["publisher"] and winget["publisher"])
+                or (registry["version"] and winget["version"]))
+
+
+def reconcile_inventory_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge only unambiguous WinGet/Registry pairs, retaining their source provenance."""
+    records = [dict(entry) for entry in entries]
+    registry = [item for item in records if item["source"] == "WINDOWS_REGISTRY"]
+    winget = [item for item in records if item["source"] == "WINGET"]
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    reverse: dict[str, list[dict[str, Any]]] = {}
+    for reg in registry:
+        matches = [win for win in winget if _can_reconcile(reg, win)]
+        candidates[reg["entry_key"]] = matches
+        for match in matches:
+            reverse.setdefault(match["entry_key"], []).append(reg)
+    merges: dict[str, dict[str, Any]] = {}
+    consumed: set[str] = set()
+    for reg in sorted(registry, key=lambda item: item["entry_key"]):
+        matches = candidates[reg["entry_key"]]
+        if len(matches) != 1 or len(reverse[matches[0]["entry_key"]]) != 1:
+            continue
+        win = matches[0]
+        sources = sorted(set(reg.get("discovery_sources", [reg["source"]])
+                             + win.get("discovery_sources", [win["source"]])))
+        merged = dict(win)
+        for field in ("publisher", "architecture", "installation_scope", "install_date", "install_location"):
+            if merged.get(field) in (None, "UNKNOWN") and reg.get(field) not in (None, "UNKNOWN"):
+                merged[field] = reg[field]
+        merged["discovery_sources"] = sources
+        merged["entry_key"] = _make_entry(name=merged["name"], version=merged["version"],
+            publisher=merged["publisher"], architecture=merged["architecture"],
+            install_date=merged["install_date"], install_location=merged["install_location"],
+            package_id=merged["package_id"], source="WINGET", scope=merged["installation_scope"])["entry_key"]
+        merges[win["entry_key"]] = merged
+        consumed.add(reg["entry_key"])
+    result = [merges.get(item["entry_key"], item) for item in records if item["entry_key"] not in consumed]
+    return sorted(result, key=lambda item: item["entry_key"])
+
+
+def _registry_entries(winreg, errors: list[str]) -> list[dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
     is_64_bit = platform.machine().lower() in {"amd64", "x86_64", "arm64", "aarch64"}
     read = winreg.KEY_READ
     views = [getattr(winreg, "KEY_WOW64_64KEY", 0),
@@ -313,7 +386,7 @@ def collect_software_inventory(*, winreg_module=None, which=shutil.which, run=_r
     detected: list[str] = []
     if windows is None:
         windows = platform.system() == "Windows"
-    entries: list[dict[str, str | None]] = []
+    entries: list[dict[str, Any]] = []
     if windows:
         if winreg_module is None:
             try:
@@ -332,6 +405,7 @@ def collect_software_inventory(*, winreg_module=None, which=shutil.which, run=_r
         entries.extend(choco)
     else:
         errors.append("windows_software_inventory_unavailable")
+    entries = reconcile_inventory_entries(entries)
     unique = {item["entry_key"]: item for item in entries}
     if len(unique) > MAX_ENTRIES:
         errors.append("inventory_entry_limit_exceeded")
@@ -344,11 +418,11 @@ def collect_software_inventory(*, winreg_module=None, which=shutil.which, run=_r
     return SoftwareInventory(bounded, errors, detected)
 
 
-def batch_entries(entries: list[dict[str, str | None]], payload_base: dict[str, Any],
-                  max_bytes: int = MAX_BATCH_BYTES) -> list[list[dict[str, str | None]]]:
+def batch_entries(entries: list[dict[str, Any]], payload_base: dict[str, Any],
+                  max_bytes: int = MAX_BATCH_BYTES) -> list[list[dict[str, Any]]]:
     """Partition inventory into protocol-safe batches, including payload metadata overhead."""
-    batches: list[list[dict[str, str | None]]] = []
-    current: list[dict[str, str | None]] = []
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
     for entry in entries:
         candidate = current + [entry]
         payload = {**payload_base, "batch_index": 255, "batch_count": 256, "entries": candidate}

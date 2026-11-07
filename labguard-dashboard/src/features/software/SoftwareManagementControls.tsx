@@ -1,20 +1,18 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import { Link } from "react-router-dom";
-import { Button, Empty, Loading, Panel, PanelTitle, QueryError } from "../../components/ui";
+import { Button, Loading, Panel, PanelTitle, QueryError } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { useAuth } from "../auth/AuthProvider";
 import { canManageLabs } from "../auth/api";
-import type { SoftwareCatalogPackage, SoftwareItem } from "../../lib/types";
+import type { SoftwareCatalogPackage } from "../../lib/types";
 import { softwareApi } from "./api";
 
-type Selection =
-  | { action: "INSTALL"; pkg: SoftwareCatalogPackage }
-  | { action: "UNINSTALL"; pkg: SoftwareCatalogPackage; item: SoftwareItem };
+type Selection = { action: "INSTALL"; pkg: SoftwareCatalogPackage };
 const selectClass = "h-9 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-[10px] text-[var(--color-foreground)]";
 
-export function SoftwareManagementControls({ id, items }: { id: string; items: SoftwareItem[] }) {
+export function SoftwareManagementControls({ id }: { id: string }) {
   const { admin } = useAuth();
   const toast = useToast();
   const qc = useQueryClient();
@@ -61,24 +59,13 @@ export function SoftwareManagementControls({ id, items }: { id: string; items: S
     onError: (error: Error) => toast("Software job was not queued. " + error.message, "error"),
   });
   const approved = catalog.data ?? [];
-  const uninstallable = useMemo(() => items.flatMap((item) => {
-    const manager = item.source === "WINGET" ? "WINGET" : item.source === "CHOCO" ? "CHOCO" : null;
-    const pkg = manager && item.package_id ? approved.find((candidate) =>
-      candidate.package_manager === manager && candidate.package_id.toLowerCase() === item.package_id!.toLowerCase()
-      && candidate.supported_scopes.includes(item.installation_scope as "MACHINE" | "USER")) : undefined;
-    return pkg ? [{ item, pkg }] : [];
-  }), [items, approved]);
   const canManage = canManageLabs(admin?.role);
   const submit = () => {
     if (!selection) return;
-    const body = selection.action === "INSTALL" ? {
+    const body = {
       action: "INSTALL" as const, catalog_package_id: selection.pkg.id,
       installation_scope: scope,
       ...(selection.pkg.version_policy === "SELECTABLE" ? { version } : {}),
-    } : {
-      action: "UNINSTALL" as const, catalog_package_id: selection.pkg.id,
-      inventory_item_id: selection.item.id,
-      installation_scope: selection.item.installation_scope as "MACHINE" | "USER",
     };
     createJob.mutate(body);
   };
@@ -135,16 +122,6 @@ export function SoftwareManagementControls({ id, items }: { id: string; items: S
         </div>)}</div>}
     </Panel>
     <Panel className="mt-4">
-      <PanelTitle>Package-manager uninstallation</PanelTitle>
-      {!items.length ? <p className="mt-3 text-[10px] text-[var(--color-muted)]">No installed software is available to review.</p> :
-        !uninstallable.length ? <Empty title="No supported uninstall targets" detail="Only present WinGet or Chocolatey entries matching an approved package can be removed. Other registry applications are unsupported." /> :
-        <div className="divide-y divide-[var(--color-border)]">{uninstallable.map(({ item, pkg }) => <div className="flex flex-wrap items-center justify-between gap-3 py-3" key={item.id}>
-          <div><strong className="block text-[11px] text-[var(--color-foreground)]">{item.name}</strong><span className="text-[9px] text-[var(--color-muted)]">{item.package_id} · {item.version || "version unknown"} · {item.installation_scope}</span></div>
-          {canManage && <Button className="border-red-200 text-red-700" onClick={() => setSelection({ action: "UNINSTALL", pkg, item })}>Uninstall</Button>}
-        </div>)}</div>}
-      {uninstallable.length > 0 && items.length > uninstallable.length && <p className="mt-3 text-[9px] text-[var(--color-muted)]">{items.length - uninstallable.length} other installed entr{items.length - uninstallable.length === 1 ? "y is" : "ies are"} unsupported for managed uninstall because it lacks an exact approved package-manager match.</p>}
-    </Panel>
-    <Panel className="mt-4">
       <PanelTitle>Software jobs <span className="text-[9px] font-normal text-[var(--color-muted)]">{jobs.data?.total ?? 0}</span></PanelTitle>
       {jobs.isError && <QueryError error={jobs.error} />}
       {jobs.isLoading ? <Loading label="Loading software jobs…" /> : !jobs.data?.items.length ?
@@ -163,7 +140,7 @@ export function SoftwareManagementControls({ id, items }: { id: string; items: S
     {selection && <div className="fixed inset-0 z-[100] grid place-items-center bg-slate-950/45 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !createJob.isPending) setSelection(null); }}>
       <section className="w-full max-w-lg rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 shadow-2xl" role="alertdialog" aria-modal="true" aria-labelledby="software-job-confirm-title">
         <h2 id="software-job-confirm-title" className="text-lg font-bold text-[var(--color-foreground)]">Confirm {selection.action.toLowerCase()}</h2>
-        <p className="my-3 text-[11px] leading-relaxed text-[var(--color-muted)]">{selection.action === "INSTALL" ? "This will run the approved package manager on this device." : "This removes the selected application using its exact approved package identifier and may affect apps in use."} Target device: <strong>{id}</strong>. Package: <strong>{selection.pkg.display_name} ({selection.pkg.package_id})</strong>.</p>
+        <p className="my-3 text-[11px] leading-relaxed text-[var(--color-muted)]">This will run the approved package manager on this device. Target device: <strong>{id}</strong>. Package: <strong>{selection.pkg.display_name} ({selection.pkg.package_id})</strong>.</p>
         {selection.action === "INSTALL" && <div className="grid gap-3">
           {selection.pkg.supported_scopes.length > 1 && <label className="text-[10px] text-[var(--color-muted)]">Installation scope <select className={selectClass} value={scope} onChange={(event) => setScope(event.target.value as "MACHINE" | "USER")}>{selection.pkg.supported_scopes.map((value) => <option key={value}>{value}</option>)}</select></label>}
           <p className="text-[10px] text-[var(--color-muted)]">Version policy: {selection.pkg.version_policy}{selection.pkg.approved_version ? " · " + selection.pkg.approved_version : ""}</p>
@@ -171,7 +148,7 @@ export function SoftwareManagementControls({ id, items }: { id: string; items: S
         </div>}
         {createJob.isError && <div role="alert" className="mt-3 text-[10px] text-red-700">{createJob.error.message}</div>}
         <div className="mt-5 flex justify-end gap-2"><Button disabled={createJob.isPending} onClick={() => setSelection(null)}>Cancel</Button>
-          <Button className={selection.action === "UNINSTALL" ? "border-red-200 text-red-700" : "bg-[var(--color-primary)] text-white"} disabled={createJob.isPending || (selection.action === "INSTALL" && selection.pkg.version_policy === "SELECTABLE" && !version)} onClick={submit}>{createJob.isPending ? "Submitting…" : selection.action === "INSTALL" ? "Confirm installation" : "Confirm uninstallation"}</Button></div>
+          <Button className="bg-[var(--color-primary)] text-white" disabled={createJob.isPending || (selection.pkg.version_policy === "SELECTABLE" && !version)} onClick={submit}>{createJob.isPending ? "Submitting…" : "Confirm installation"}</Button></div>
       </section>
     </div>}
   </>;

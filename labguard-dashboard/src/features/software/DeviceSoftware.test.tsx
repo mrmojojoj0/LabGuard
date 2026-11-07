@@ -4,8 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { DeviceSoftware } from "./DeviceSoftware";
 
-const mocks = vi.hoisted(() => ({ device: vi.fn(), refresh: vi.fn(), toast: vi.fn(), role: { value: "LAB_ADMIN" as string } }));
-vi.mock("./api", () => ({ softwareApi: { device: mocks.device, refresh: mocks.refresh } }));
+const mocks = vi.hoisted(() => ({ device: vi.fn(), refresh: vi.fn(), catalog: vi.fn(), jobs: vi.fn(), search: vi.fn(), details: vi.fn(), createJob: vi.fn(), toast: vi.fn(), role: { value: "LAB_ADMIN" as string } }));
+vi.mock("./api", () => ({ softwareApi: { device: mocks.device, refresh: mocks.refresh, catalog: mocks.catalog, jobs: mocks.jobs, searchWingetRepository: mocks.search, wingetPackageDetails: mocks.details, createJob: mocks.createJob } }));
 vi.mock("../auth/AuthProvider", () => ({ useAuth: () => ({ admin: { role: mocks.role.value } }) }));
 vi.mock("../../components/Toast", () => ({ useToast: () => mocks.toast }));
 
@@ -21,6 +21,11 @@ beforeEach(() => {
     total: 1, offset: 0, limit: 100,
   });
   mocks.refresh.mockResolvedValue({ device_id: "device-1", request_id: "r1", status: "requested" });
+  mocks.catalog.mockResolvedValue([]);
+  mocks.jobs.mockResolvedValue({ items: [], total: 0, offset: 0, limit: 100 });
+  mocks.search.mockResolvedValue({ source: "winget", winget_version: "v1.9", results: [{ name: "Vendor Editor", package_id: "Vendor.Editor", version: "1.2.3", publisher: null, source: "winget" }] });
+  mocks.details.mockResolvedValue({ display_name: "Vendor Editor", package_id: "Vendor.Editor", version: "1.2.3", publisher: "Vendor Inc", description: null, source: "winget" });
+  mocks.createJob.mockResolvedValue({ id: "job-1" });
   mocks.toast.mockReset();
 });
 afterEach(() => cleanup());
@@ -52,5 +57,26 @@ describe("device software inventory", () => {
     expect(await screen.findByText("Current partial inventory")).toBeTruthy();
     expect(screen.getByText(/Last successful:/).parentElement?.textContent).not.toContain("Never");
     expect(screen.getByText(/Last complete:/).parentElement?.textContent).toContain("Never");
+  });
+
+  it("keeps unsupported installed applications visible without offering uninstall", async () => {
+    renderPanel();
+    expect(await screen.findByText("Editor")).toBeTruthy();
+    expect(await screen.findByText(/Unavailable: no exact supported package identity/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Uninstall" })).toBeNull();
+  });
+
+  it("installs a verified WinGet package directly to the current device", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await user.type(await screen.findByLabelText("Device WinGet search"), "Vendor Editor");
+    await user.click(screen.getByRole("button", { name: "Search WinGet" }));
+    await user.click(await screen.findByRole("button", { name: /^Install$/ }));
+    expect(await screen.findByText(/Vendor Inc/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Confirm installation" }));
+    await vi.waitFor(() => expect(mocks.createJob).toHaveBeenCalledWith("device-1", {
+      action: "INSTALL", package_manager: "WINGET", package_id: "Vendor.Editor",
+      source: "winget", installation_scope: "MACHINE", version: "1.2.3",
+    }));
   });
 });

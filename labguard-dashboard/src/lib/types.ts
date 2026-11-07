@@ -102,6 +102,7 @@ export interface SoftwareItem {
   install_location: string | null;
   package_id: string | null;
   source: "WINDOWS_REGISTRY" | "WINGET" | "CHOCO";
+  discovery_sources?: Array<"WINDOWS_REGISTRY" | "WINGET" | "CHOCO">;
   installation_scope: "MACHINE" | "USER" | "UNKNOWN";
   first_seen_at: string;
   last_seen_at: string;
@@ -187,7 +188,16 @@ export interface WingetDiscoveryResult {
   package_id: string;
   version: string | null;
   source: string;
-  catalog_status: SoftwareCatalogPackage["approval_status"] | null;
+  publisher?: string | null;
+  catalog_status?: SoftwareCatalogPackage["approval_status"] | null;
+}
+export interface WingetPackageDetails {
+  display_name: string;
+  package_id: string;
+  version: string | null;
+  publisher: string | null;
+  description: string | null;
+  source: string;
 }
 export interface SoftwareJob {
   id: string;

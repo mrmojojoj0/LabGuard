@@ -324,18 +324,26 @@ def list_winget_repository_sources(_admin=Depends(require_role("SUPER_ADMIN"))):
 def search_winget_repository(query: str = Query(min_length=1, max_length=128),
                              source: str = Query(default="winget", min_length=1, max_length=64,
                                                  pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"),
-                             _admin=Depends(require_role("SUPER_ADMIN")), db: Session = Depends(get_db)):
+                             _admin=Depends(require_role("LAB_ADMIN"))):
+    if source.casefold() != "winget":
+        raise HTTPException(status_code=422, detail={"code": "winget_source_not_deployable",
+                           "message": "Deployment searches are restricted to the fixed winget community source"})
     try:
         version, packages = search_winget_packages(query, source)
     except WingetDiscoveryError as exc:
         raise HTTPException(status_code=503, detail={"code": exc.code, "message": exc.message}) from exc
-    results = []
-    for package in packages:
-        existing = db.scalar(select(SoftwareCatalogPackage).where(
-            SoftwareCatalogPackage.package_manager == "WINGET",
-            func.lower(SoftwareCatalogPackage.package_id) == package.package_id.lower()))
-        results.append({**package.as_dict(), "catalog_status": existing.approval_status if existing else None})
-    return {"source": source, "winget_version": version, "results": results}
+    return {"source": "winget", "winget_version": version, "results": [package.as_dict() for package in packages]}
+
+
+@router.get("/software/discovery/package/{package_id}")
+def get_winget_repository_package(package_id: str = Path(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$"),
+                                 _admin=Depends(require_role("LAB_ADMIN"))):
+    try:
+        metadata = get_winget_package_metadata(package_id, "winget")
+    except WingetDiscoveryError as exc:
+        status = 422 if exc.code.startswith("invalid_") or exc.code.endswith("mismatch") else 503
+        raise HTTPException(status_code=status, detail={"code": exc.code, "message": exc.message}) from exc
+    return {**metadata, "source": "winget"}
 
 
 @router.post("/software/discovery/import", status_code=201)
@@ -456,8 +464,18 @@ def reject_software_catalog_package(package_id: UUID,
 async def create_device_software_job(device_id: UUID, body: SoftwareJobCreate, request: Request,
                                      admin=Depends(require_role("LAB_ADMIN", csrf=True)),
                                      db: Session = Depends(get_db)):
+    direct_winget = None
+    if body.action == "INSTALL" and body.catalog_package_id is None:
+        if body.package_manager != "WINGET" or body.source is None or body.source.casefold() != "winget" or body.package_id is None:
+            raise HTTPException(status_code=422, detail={"code": "invalid_direct_package", "message": "Direct installation is restricted to exact WinGet package IDs from the winget source"})
+        try:
+            direct_winget = get_winget_package_metadata(body.package_id, "winget", body.version)
+        except WingetDiscoveryError as exc:
+            status = 422 if exc.code.startswith("invalid_") or exc.code.endswith("mismatch") or exc.code == "version_not_found" else 503
+            raise HTTPException(status_code=status, detail={"code": exc.code, "message": exc.message}) from exc
     job = create_software_job(db, device_id, admin.id, body,
-        choco_source_configured=bool(request.app.state.settings.chocolatey_source_url))
+        choco_source_configured=bool(request.app.state.settings.chocolatey_source_url),
+        direct_winget=direct_winget)
     audit(db, admin.id, "software.job_requested", "software_job", str(job.id), {
         "device_id": str(device_id), "action": job.action, "package_id": job.package_id,
         "package_manager": job.package_manager,

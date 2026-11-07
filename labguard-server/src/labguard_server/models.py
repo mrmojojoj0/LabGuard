@@ -175,6 +175,7 @@ class SoftwareInventoryItem(Base):
     install_location: Mapped[str | None] = mapped_column(String(1024))
     package_id: Mapped[str | None] = mapped_column(String(256), index=True)
     source: Mapped[str] = mapped_column(String(32), index=True)
+    discovery_sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
     installation_scope: Mapped[str] = mapped_column(String(16), index=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
@@ -289,3 +290,20 @@ class AuditEvent(Base):
     result: Mapped[str] = mapped_column(String(20), default="SUCCESS")
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
     metadata_json: Mapped[str | None] = mapped_column(Text)
+
+
+class RdpAccessRequest(Base):
+    __tablename__ = "rdp_access_requests"
+    __table_args__ = (
+        CheckConstraint("status IN ('PENDING', 'READY', 'FAILED', 'EXPIRED')", name="ck_rdp_access_requests_status"),
+        Index("ix_rdp_access_requests_device_status", "device_id", "status"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    requested_by: Mapped[UUID | None] = mapped_column(ForeignKey("administrators.id", ondelete="SET NULL"), index=True)
+    hostname: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    access_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

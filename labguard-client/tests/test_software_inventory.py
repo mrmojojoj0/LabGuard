@@ -10,7 +10,65 @@ import pytest
 from labguard_client.agent import AgentClient
 from labguard_client.identity import DeviceIdentity
 from labguard_client.service_config import AgentConfig
-from labguard_client.software_inventory import batch_entries, collect_software_inventory, inventory_digest
+from labguard_client.software_inventory import (_make_entry, batch_entries, collect_software_inventory,
+    inventory_digest, reconcile_inventory_entries)
+
+
+def _inventory_record(source, name="Sample App", package_id=None, version="1.0", publisher="Sample Co",
+                      architecture="x64", scope="MACHINE"):
+    return _make_entry(name=name, package_id=package_id, version=version, publisher=publisher,
+        architecture=architecture, install_date=None, install_location=None, source=source, scope=scope)
+
+
+def test_reconcile_winget_registry_duplicate_and_preserve_provenance():
+    registry = _inventory_record("WINDOWS_REGISTRY", "Mozilla Firefox (x64 en-US)", version="130.0")
+    winget = _inventory_record("WINGET", "Mozilla Firefox", "Mozilla.Firefox", "130.0", None, "UNKNOWN", "UNKNOWN")
+    result = reconcile_inventory_entries([registry, winget])
+    assert len(result) == 1
+    assert result[0]["source"] == "WINGET"
+    assert result[0]["package_id"] == "Mozilla.Firefox"
+    assert result[0]["discovery_sources"] == ["WINDOWS_REGISTRY", "WINGET"]
+    assert result[0]["architecture"] == "x64"
+    assert result[0]["installation_scope"] == "MACHINE"
+
+
+def test_reconcile_keeps_same_name_different_package_ids_and_conflicting_installs():
+    base = _inventory_record("WINDOWS_REGISTRY", package_id="Vendor.Editor")
+    different_id = _inventory_record("WINGET", package_id="Other.Editor")
+    different_version = _inventory_record("WINGET", version="2.0")
+    different_arch = _inventory_record("WINGET", architecture="ARM64")
+    different_scope = _inventory_record("WINGET", scope="USER")
+    different_edition = _inventory_record("WINGET", "Sample App Enterprise", "Vendor.Editor")
+    exact_id = _inventory_record("WINGET", package_id="Vendor.Editor")
+    result = reconcile_inventory_entries([base, different_id, different_version, different_arch, different_scope,
+                                          different_edition, exact_id])
+    assert len(result) == 6  # only the same exact package-ID installation was merged
+    assert any(item["name"] == "Sample App Enterprise" and item["source"] == "WINGET" for item in result)
+
+
+def test_reconcile_ambiguous_or_unmatched_registry_entries_and_missing_metadata():
+    registry = _inventory_record("WINDOWS_REGISTRY", version=None, publisher=None, package_id=None)
+    winget_one = _inventory_record("WINGET", package_id="Vendor.App.One", version=None, publisher=None)
+    winget_two = _inventory_record("WINGET", package_id="Vendor.App.Two", version=None, publisher=None)
+    unmatched = _inventory_record("WINDOWS_REGISTRY", "Unknown Registry Tool", version=None, publisher=None)
+    result = reconcile_inventory_entries([registry, winget_one, winget_two, unmatched])
+    assert len(result) == 4
+    assert any(item["name"] == "Unknown Registry Tool" and item["source"] == "WINDOWS_REGISTRY" for item in result)
+    assert reconcile_inventory_entries(result) == result
+
+
+def test_exact_package_id_reconciles_when_publisher_and_version_are_missing():
+    registry = _inventory_record("WINDOWS_REGISTRY", version=None, publisher=None, package_id="Vendor.Exact")
+    winget = _inventory_record("WINGET", version=None, publisher=None, package_id="Vendor.Exact")
+    result = reconcile_inventory_entries([registry, winget])
+    assert len(result) == 1
+    assert result[0]["discovery_sources"] == ["WINDOWS_REGISTRY", "WINGET"]
+
+
+def test_reconciliation_is_deterministic_for_reordered_input():
+    pair = [_inventory_record("WINDOWS_REGISTRY", "Mozilla Firefox (x64 en-US)", version="130.0"),
+            _inventory_record("WINGET", "Mozilla Firefox", "Mozilla.Firefox", "130.0", None, "UNKNOWN", "UNKNOWN")]
+    assert reconcile_inventory_entries(pair) == reconcile_inventory_entries(list(reversed(pair)))
 
 
 class _Key:

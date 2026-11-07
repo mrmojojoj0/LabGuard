@@ -114,6 +114,7 @@ def record_software_inventory_batch(db: Session, device_id: UUID, sequence: int,
     by_key = {item.entry_key: item for item in existing}
     for entry in payload.entries:
         values = entry.model_dump()
+        values["discovery_sources"] = values["discovery_sources"] or [entry.source]
         product_source = f"{entry.name.casefold().strip()}\x1f{(entry.publisher or '').casefold().strip()}"
         product_key = hashlib.sha256(product_source.encode("utf-8")).hexdigest()
         item = by_key.get(entry.entry_key)
@@ -210,6 +211,7 @@ def _item_out(row: SoftwareInventoryItem) -> dict:
             "publisher": row.publisher, "architecture": row.architecture,
             "install_date": row.install_date, "install_location": row.install_location,
             "package_id": row.package_id, "source": row.source,
+            "discovery_sources": row.discovery_sources or [row.source],
             "installation_scope": row.installation_scope,
             "first_seen_at": row.first_seen_at.isoformat(), "last_seen_at": row.last_seen_at.isoformat()}
 

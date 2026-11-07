@@ -5,7 +5,8 @@ import { useToast } from "../../components/Toast";
 import { useAuth } from "../auth/AuthProvider";
 import { canManageLabs } from "../auth/api";
 import { softwareApi } from "./api";
-import { SoftwareManagementControls } from "./SoftwareManagementControls";
+import { InventoryUninstallAction } from "./InventoryUninstallAction";
+import { DeviceSoftwareInstaller } from "./DeviceSoftwareInstaller";
 
 export function DeviceSoftware({ id }: { id: string }) {
   const qc = useQueryClient();
@@ -25,6 +26,7 @@ export function DeviceSoftware({ id }: { id: string }) {
   const successfulAt = collection?.last_successful_at;
   const stale = collection?.stale;
   return <>
+  {canManageLabs(admin?.role) && <DeviceSoftwareInstaller deviceId={id} />}
   <Panel>
     <PanelTitle aside={canManageLabs(admin?.role) ? <Button disabled={refresh.isPending} onClick={() => refresh.mutate()}><RefreshCw size={13} className={refresh.isPending ? "animate-spin" : ""}/>{refresh.isPending ? "Requesting…" : "Refresh inventory"}</Button> : undefined}>Installed software</PanelTitle>
     <div className="my-3 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg bg-[var(--color-surface-subtle)] p-3 text-[10px]">
@@ -36,9 +38,8 @@ export function DeviceSoftware({ id }: { id: string }) {
       {Boolean(collection?.errors.length) && <span className="text-amber-700">Partial collection: {collection?.errors.join(", ")}</span>}
     </div>
     {result.isError && <QueryError error={result.error}/>}
-    {result.isLoading ? <Loading label="Loading device software…"/> : !result.data?.items.length ? <Empty title="No installed software reported" detail="The agent reports inventory after authentication and on its configured schedule."/> : <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-left text-[10px]"><thead><tr className="border-b border-[var(--color-border)] text-[var(--color-muted)]">{["Application", "Version", "Publisher", "Architecture", "Installed", "Scope / source"].map((item) => <th className="px-2 py-2 font-semibold" key={item}>{item}</th>)}</tr></thead><tbody>{result.data.items.map((item) => <tr className="border-b border-[var(--color-border)] last:border-0" key={item.id}><td className="px-2 py-3 font-semibold text-[var(--color-foreground)]">{item.name}</td><td className="px-2 py-3 text-[var(--color-muted)]">{item.version || "—"}</td><td className="px-2 py-3 text-[var(--color-muted)]">{item.publisher || "—"}</td><td className="px-2 py-3 text-[var(--color-muted)]">{item.architecture}</td><td className="px-2 py-3 text-[var(--color-muted)]">{item.install_date || "—"}</td><td className="px-2 py-3 text-[var(--color-muted)]">{item.installation_scope} · {item.source}</td></tr>)}</tbody></table></div>}
+    {result.isLoading ? <Loading label="Loading device software…"/> : !result.data?.items.length ? <Empty title="No installed software reported" detail="The agent reports inventory after authentication and on its configured schedule."/> : <div className="overflow-x-auto"><table className="w-full min-w-[880px] text-left text-[10px]"><thead><tr className="border-b border-[var(--color-border)] text-[var(--color-muted)]">{["Application", "Version", "Publisher", "Architecture", "Installed", "Scope / sources", "Action"].map((item) => <th className="px-2 py-2 font-semibold" key={item}>{item}</th>)}</tr></thead><tbody>{result.data.items.map((item) => <tr className="border-b border-[var(--color-border)] last:border-0" key={item.id}><td className="px-2 py-3 font-semibold text-[var(--color-foreground)]">{item.name}</td><td className="px-2 py-3 text-[var(--color-muted)]">{item.version || "—"}</td><td className="px-2 py-3 text-[var(--color-muted)]">{item.publisher || "—"}</td><td className="px-2 py-3 text-[var(--color-muted)]">{item.architecture}</td><td className="px-2 py-3 text-[var(--color-muted)]">{item.install_date || "—"}</td><td className="px-2 py-3 text-[var(--color-muted)]">{item.installation_scope} · {(item.discovery_sources ?? [item.source]).join(" + ")}</td><td className="px-2 py-3"><InventoryUninstallAction deviceId={id} item={item}/></td></tr>)}</tbody></table></div>}
     {collection?.status === "IN_PROGRESS" && <p className="mt-3 text-[9px] text-[var(--color-muted)]">A scan is still running. The list updates when the collection completes.</p>}
   </Panel>
-  <SoftwareManagementControls id={id} items={result.data?.items ?? []} />
   </>;
 }

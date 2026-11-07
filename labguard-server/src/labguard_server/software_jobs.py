@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from labguard_server.models import (Device, DeviceCredential, DeviceStatus, SoftwareCatalogPackage,
                                    SoftwareInventoryItem, SoftwareJob, now_utc)
 from labguard_server.schemas import SoftwareJobCreate, SoftwareJobEventIn
+from labguard_server.winget_discovery import PACKAGE_ID_RE
 
 ACTIVE_JOB_STATES = ("PENDING", "DISPATCHED", "RUNNING")
 TERMINAL_JOB_STATES = ("SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED")
@@ -56,45 +57,70 @@ def job_out(job: SoftwareJob) -> dict:
 
 
 def create_software_job(db: Session, device_id: UUID, requested_by: UUID, body: SoftwareJobCreate,
-                        *, choco_source_configured: bool) -> SoftwareJob:
+                        *, choco_source_configured: bool, direct_winget: dict | None = None) -> SoftwareJob:
     status = db.scalar(select(DeviceStatus).where(DeviceStatus.device_id == device_id).with_for_update())
     device = db.get(Device, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Device not found"})
     if status is None or not device.enabled or device.enrollment_state != "APPROVED":
         raise HTTPException(status_code=409, detail={"code": "device_unavailable", "message": "Device is not approved and enabled"})
-    package = db.get(SoftwareCatalogPackage, body.catalog_package_id)
-    if package is None or not package.approved:
-        raise HTTPException(status_code=409, detail={"code": "package_not_approved", "message": "Select an approved catalog package"})
-    if package.package_manager == "CHOCO" and not choco_source_configured:
-        raise HTTPException(status_code=503, detail={"code": "chocolatey_source_unconfigured", "message": "Chocolatey source is not configured"})
-    if body.installation_scope not in package.supported_scopes:
-        raise HTTPException(status_code=422, detail={"code": "unsupported_scope", "message": "Package does not support that installation scope"})
-
+    package = db.get(SoftwareCatalogPackage, body.catalog_package_id) if body.catalog_package_id else None
     version = None
     inventory_item = None
     if body.action == "INSTALL":
-        if package.version_policy == "PINNED":
-            if body.version is not None and body.version != package.approved_version:
-                raise HTTPException(status_code=422, detail={"code": "version_not_approved", "message": "Only the approved package version can be installed"})
-            version = package.approved_version
-        elif package.version_policy == "SELECTABLE":
-            if body.version is None:
-                raise HTTPException(status_code=422, detail={"code": "version_required", "message": "Choose a package version"})
+        if package is not None:
+            if not package.approved:
+                raise HTTPException(status_code=409, detail={"code": "package_not_approved", "message": "Select an approved catalog package"})
+            if package.package_manager == "CHOCO" and not choco_source_configured:
+                raise HTTPException(status_code=503, detail={"code": "chocolatey_source_unconfigured", "message": "Chocolatey source is not configured"})
+            if body.installation_scope not in package.supported_scopes:
+                raise HTTPException(status_code=422, detail={"code": "unsupported_scope", "message": "Package does not support that installation scope"})
+            if package.version_policy == "PINNED":
+                if body.version is not None and body.version != package.approved_version:
+                    raise HTTPException(status_code=422, detail={"code": "version_not_approved", "message": "Only the approved package version can be installed"})
+                version = package.approved_version
+            elif package.version_policy == "SELECTABLE":
+                if body.version is None:
+                    raise HTTPException(status_code=422, detail={"code": "version_required", "message": "Choose a package version"})
+                version = body.version
+            elif body.version is not None:
+                raise HTTPException(status_code=422, detail={"code": "version_not_selectable", "message": "This package is configured to use its latest version"})
+            package_id, manager, source = package.package_id, package.package_manager, package.source
+        else:
+            if direct_winget is None or body.package_manager != "WINGET" or not body.package_id or not body.source:
+                raise HTTPException(status_code=422, detail={"code": "invalid_direct_package", "message": "A validated WinGet search result is required"})
+            if body.source.casefold() != "winget" or not PACKAGE_ID_RE.fullmatch(body.package_id):
+                raise HTTPException(status_code=422, detail={"code": "invalid_direct_package", "message": "WinGet package ID or source is invalid"})
+            if direct_winget.get("package_id", "").casefold() != body.package_id.casefold():
+                raise HTTPException(status_code=422, detail={"code": "package_identity_mismatch", "message": "WinGet package identity could not be verified"})
+            verified_version = direct_winget.get("version")
+            if body.version is not None and (not verified_version or body.version != verified_version):
+                raise HTTPException(status_code=422, detail={"code": "version_not_found", "message": "The selected version could not be verified from WinGet"})
             version = body.version
-        elif body.version is not None:
-            raise HTTPException(status_code=422, detail={"code": "version_not_selectable", "message": "This package is configured to use its latest version"})
+            if body.installation_scope not in {"MACHINE", "USER"}:
+                raise HTTPException(status_code=422, detail={"code": "unsupported_scope", "message": "WinGet scope is invalid"})
+            package_id, manager, source = body.package_id, "WINGET", "WINGET_COMMUNITY"
     else:
         inventory_item = db.get(SoftwareInventoryItem, body.inventory_item_id)
         if inventory_item is None or inventory_item.device_id != device_id or not inventory_item.is_present:
             raise HTTPException(status_code=409, detail={"code": "installation_unavailable", "message": "The selected installation is no longer present on this device"})
-        expected_source = "WINGET" if package.package_manager == "WINGET" else "CHOCO"
-        if inventory_item.source != expected_source or inventory_item.package_id is None:
-            raise HTTPException(status_code=409, detail={"code": "uninstall_unsupported", "message": "This inventory entry is not safely removable through its approved package manager"})
-        if inventory_item.package_id.casefold() != package.package_id.casefold():
-            raise HTTPException(status_code=409, detail={"code": "catalog_identity_mismatch", "message": "Installed package does not match the approved catalog identity"})
-        if inventory_item.installation_scope not in package.supported_scopes:
-            raise HTTPException(status_code=409, detail={"code": "unsupported_scope", "message": "This installed scope is not supported by the approved package"})
+        if inventory_item.source not in {"WINGET", "CHOCO"} or not inventory_item.package_id or not PACKAGE_ID_RE.fullmatch(inventory_item.package_id):
+            raise HTTPException(status_code=409, detail={"code": "uninstall_unsupported", "message": "This inventory entry does not have a safely validated package identity"})
+        manager = "WINGET" if inventory_item.source == "WINGET" else "CHOCO"
+        package_id = inventory_item.package_id
+        source = "WINGET_COMMUNITY" if manager == "WINGET" else "CHOCO_CONFIGURED"
+        if (manager == "WINGET" and inventory_item.installation_scope not in {"MACHINE", "USER"}
+                or manager == "CHOCO" and inventory_item.installation_scope != "MACHINE"):
+            raise HTTPException(status_code=409, detail={"code": "uninstall_unsupported", "message": "This installed scope is not supported by the package manager"})
+        if package is not None:
+            if not package.approved or package.package_manager != manager:
+                raise HTTPException(status_code=409, detail={"code": "package_not_approved", "message": "The selected catalog package is not available"})
+            if package.package_id.casefold() != package_id.casefold():
+                raise HTTPException(status_code=409, detail={"code": "catalog_identity_mismatch", "message": "Installed package does not match the catalog identity"})
+            if inventory_item.installation_scope not in package.supported_scopes:
+                raise HTTPException(status_code=409, detail={"code": "unsupported_scope", "message": "This installed scope is not supported by the catalog package"})
+        if manager == "CHOCO" and (inventory_item.installation_scope != "MACHINE" or not choco_source_configured):
+            raise HTTPException(status_code=409, detail={"code": "uninstall_unsupported", "message": "Chocolatey uninstall requires a configured machine-scope installation"})
 
     active = db.scalar(select(SoftwareJob.id).where(
         SoftwareJob.device_id == device_id, SoftwareJob.status.in_(ACTIVE_JOB_STATES),
@@ -104,11 +130,11 @@ def create_software_job(db: Session, device_id: UUID, requested_by: UUID, body: 
 
     now = now_utc()
     job = SoftwareJob(
-        device_id=device_id, catalog_package_id=package.id, requested_by=requested_by,
-        action=body.action, package_id=package.package_id, package_manager=package.package_manager,
+        device_id=device_id, catalog_package_id=package.id if package else None, requested_by=requested_by,
+        action=body.action, package_id=package_id, package_manager=manager,
         requested_version=version,
         installation_scope=inventory_item.installation_scope if inventory_item else body.installation_scope,
-        source=package.source, status="PENDING", progress_percent=0,
+        source=source, status="PENDING", progress_percent=0,
         expires_at=now + timedelta(seconds=body.expires_in_seconds),
     )
     db.add(job)

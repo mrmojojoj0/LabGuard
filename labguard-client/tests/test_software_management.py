@@ -288,3 +288,34 @@ def test_job_reports_lifecycle_and_requires_inventory_verification(tmp_path, mon
     assert "client.job.progress" in types
     assert types[-1] == "client.job.completed"
     assert sent[-1][1]["result_code"] == "verified_success"
+
+
+@pytest.mark.parametrize("complete, expected", [(True, "verified_success"), (False, "inventory_verification_failed")])
+def test_uninstall_success_requires_complete_fresh_inventory(tmp_path, monkeypatch, complete, expected):
+    identity = DeviceIdentity.ephemeral()
+    identity.state_file = tmp_path / "identity.json"
+    client = AgentClient("https://server.example.test", identity)
+    sent = []
+
+    async def send(_ws, event_type, payload, _pending, _lock):
+        sent.append((event_type, payload))
+        return {"accepted": True}
+
+    async def inventory(*_args, **_kwargs):
+        return True
+
+    class Collected:
+        entries = []
+        errors = []
+    collected = Collected()
+    collected.complete = complete
+    collected.errors = [] if complete else ["winget_command_failed"]
+
+    monkeypatch.setattr(client, "_send_session_event", send)
+    monkeypatch.setattr(client, "_collect_and_send_software_inventory", inventory)
+    monkeypatch.setattr("labguard_client.agent.collect_software_inventory", lambda: collected)
+    monkeypatch.setattr("labguard_client.agent.execute_package_job", lambda *_args, **_kwargs: PackageResult(0, "removed"))
+    asyncio.run(client._run_software_job(offer_payload(action="UNINSTALL"), object(), {}, asyncio.Lock()))
+    terminal = sent[-1][1]
+    assert terminal["result_code"] == expected
+    assert sent[-1][0] == ("client.job.completed" if complete else "client.job.failed")
