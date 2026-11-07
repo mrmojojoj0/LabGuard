@@ -3,6 +3,7 @@ import type {
   Device,
   DeviceStatus,
   DeviceTelemetry,
+  RdpAccessRequest,
   TelemetrySample,
   TelemetrySummary,
 } from "../../lib/types";
@@ -26,4 +27,7 @@ export const devicesApi = {
       `/devices/${id}/telemetry/history?limit=${limit}`,
     ),
   telemetrySummary: () => api<TelemetrySummary>("/telemetry/summary"),
+  requestRdp: (id: string) => api<RdpAccessRequest>(`/devices/${id}/rdp/requests`, { method: "POST", body: JSON.stringify({}) }),
+  rdpRequest: (deviceId: string, requestId: string) =>
+    api<RdpAccessRequest>(`/devices/${deviceId}/rdp/requests/${requestId}`),
 };

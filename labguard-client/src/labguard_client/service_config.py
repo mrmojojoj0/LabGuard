@@ -19,8 +19,8 @@ class AgentConfig:
         parsed = urlsplit(self.server_url)
         if not isinstance(self.allow_insecure_dev, bool):
             raise ValueError("allow_insecure_dev must be a boolean")
-        if parsed.scheme not in ({"https", "http"} if self.allow_insecure_dev else {"https"}) or not parsed.netloc or parsed.username or parsed.password:
-            raise ValueError("Service server_url must be HTTPS unless insecure development mode is explicitly enabled, without embedded credentials")
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("Service server_url must be a valid HTTP or HTTPS URL without embedded credentials")
         if parsed.query or parsed.fragment:
             raise ValueError("Service server_url cannot include a query or fragment")
         if not self.state_dir.is_absolute():

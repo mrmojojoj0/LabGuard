@@ -161,6 +161,16 @@ def test_inventory_min_interval_setting_is_bounded():
             Settings(**base, software_inventory_min_interval_seconds=value).validate()
 
 
+def test_chocolatey_source_accepts_http_and_https_but_rejects_other_schemes():
+    from labguard_server.config import Settings
+
+    base = {"database_url": "sqlite:///labguard.db", "session_secret": "s" * 32}
+    for scheme in ("http", "https"):
+        Settings(**base, chocolatey_source_url=f"{scheme}://packages.example.test/choco").validate()
+    with pytest.raises(RuntimeError, match="HTTP or HTTPS"):
+        Settings(**base, chocolatey_source_url="ftp://packages.example.test/choco").validate()
+
+
 def test_inventory_validation_authentication_and_filter_pagination(client):
     device_id, _ = enroll(client, "API-INVENTORY-PC")
     with pytest.raises(ValidationError):

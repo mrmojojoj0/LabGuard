@@ -76,6 +76,6 @@ class Settings:
             raise RuntimeError("Software job timeout must be between 60 and 7200 seconds")
         if self.chocolatey_source_url:
             parsed = urlsplit(self.chocolatey_source_url)
-            if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password
                     or parsed.query or parsed.fragment):
-                raise RuntimeError("CHOCOLATEY_SOURCE_URL must be an HTTPS URL without credentials, query, or fragment")
+                raise RuntimeError("CHOCOLATEY_SOURCE_URL must be an HTTP or HTTPS URL without credentials, query, or fragment")

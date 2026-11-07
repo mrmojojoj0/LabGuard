@@ -65,8 +65,6 @@ def service_command(action: str, *, insecure_dev: bool = False) -> str:
         if not CONFIG_PATH.is_file():
             raise RuntimeError("Run labguard-agent service prepare first")
         config = AgentConfig.load(CONFIG_PATH)
-        if config.server_url.startswith("http://") and not insecure_dev:
-            raise RuntimeError("Service configuration enables HTTP; pass --insecure-dev explicitly to install it")
         if not (config.state_dir / "identity.json").is_file():
             raise RuntimeError("Service identity is missing; prepare again with the original enrolled identity")
         service_host = _service_host_executable(win32service)

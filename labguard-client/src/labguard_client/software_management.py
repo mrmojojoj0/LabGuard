@@ -67,8 +67,8 @@ class SoftwareJobOffer:
             if source != "CHOCO_CONFIGURED" or not isinstance(source_url, str):
                 raise ValueError("Invalid Chocolatey source")
             parsed = urlsplit(source_url)
-            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-                raise ValueError("Chocolatey source must be a configured HTTPS URL")
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ValueError("Chocolatey source must be a configured HTTP or HTTPS URL")
         else:
             raise ValueError("Unsupported package manager")
         scope = payload["installation_scope"]

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import re
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -95,7 +94,7 @@ def _remove_firewall_rules(marker, system_root, run_process):
 
 def cleanup_expired_rdp_access(*, registry_module=None, run_process=subprocess.run,
                                windows: bool | None = None, system_root: str | None = None,
-                               now: datetime | None = None) -> bool:
+                               now: datetime | None = None, force: bool = False) -> bool:
     """Restore the machine setting and remove LabGuard's firewall rules at lease expiry."""
     windows = os.name == "nt" if windows is None else windows
     if not windows:
@@ -107,7 +106,7 @@ def cleanup_expired_rdp_access(*, registry_module=None, run_process=subprocess.r
         return False
     expires = datetime.fromisoformat(marker["access_expires_at"].replace("Z", "+00:00"))
     now = now or datetime.now(UTC)
-    if expires > now.astimezone(UTC):
+    if expires > now.astimezone(UTC) and not force:
         return False
     original = marker.get("original_f_deny")
     if original is None:
@@ -126,7 +125,8 @@ def cleanup_expired_rdp_access(*, registry_module=None, run_process=subprocess.r
 
 def prepare_rdp_access(request_id: str, access_expires_at: str, *, registry_module=None,
                        run_process=subprocess.run, windows: bool | None = None,
-                       system_root: str | None = None, now: datetime | None = None) -> dict:
+                       system_root: str | None = None, now: datetime | None = None,
+                       elevated: bool | None = None) -> dict:
     """Enable RDP for one bounded lease without changing NLA or public firewall profiles."""
     try:
         request_uuid = str(UUID(request_id))
@@ -139,8 +139,15 @@ def prepare_rdp_access(request_id: str, access_expires_at: str, *, registry_modu
         return {"status": "FAILED", "error_code": "rdp_windows_only"}
     if expiry <= now.astimezone(UTC) or expiry > now.astimezone(UTC) + timedelta(minutes=_LEASE_MINUTES + 2):
         return {"status": "FAILED", "error_code": "invalid_rdp_lease"}
+    if elevated is None:
+        from labguard_client.software_management import is_administrator, running_as_local_system
+        elevated = running_as_local_system() or is_administrator()
+    if not elevated:
+        return {"status": "FAILED", "error_code": "rdp_requires_elevation"}
     registry = registry_module or _load_winreg()
     system_root = system_root or os.environ.get("SystemRoot", r"C:\Windows")
+    marker = None
+    marker_saved = False
     try:
         edition, _ = _read_value(registry, registry.HKEY_LOCAL_MACHINE,
                                  r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "EditionID")
@@ -169,12 +176,14 @@ def prepare_rdp_access(request_id: str, access_expires_at: str, *, registry_modu
                       "firewall_rules": rules}
         else:
             marker["request_id"] = request_uuid
-            marker["access_expires_at"] = expiry.isoformat().replace("+00:00", "Z")
+            old_expiry = datetime.fromisoformat(marker["access_expires_at"].replace("Z", "+00:00"))
+            marker["access_expires_at"] = max(old_expiry, expiry).astimezone(UTC).isoformat().replace("+00:00", "Z")
             rules = marker["firewall_rules"]
 
         # Save recovery information before the first machine-wide side effect.
         _write_value(registry, registry.HKEY_LOCAL_MACHINE, _TERMINAL_SERVICES,
                      _RDP_STATE_VALUE, json.dumps(marker, separators=(",", ":")), registry.REG_SZ)
+        marker_saved = True
         if not existing_lease and (marker["original_f_deny"] is None or marker["original_f_deny"]["value"] != 0):
             _write_value(registry, registry.HKEY_LOCAL_MACHINE, _TERMINAL_SERVICES,
                          _F_DENY, 0, registry.REG_DWORD)
@@ -185,6 +194,24 @@ def prepare_rdp_access(request_id: str, access_expires_at: str, *, registry_modu
                                      "remoteip=localsubnet"], run_process)
         return {"status": "READY", "error_code": None}
     except RdpAccessError as exc:
+        if marker_saved and marker is not None:
+            marker["access_expires_at"] = now.astimezone(UTC).isoformat().replace("+00:00", "Z")
+            try:
+                _write_value(registry, registry.HKEY_LOCAL_MACHINE, _TERMINAL_SERVICES,
+                             _RDP_STATE_VALUE, json.dumps(marker, separators=(",", ":")), registry.REG_SZ)
+                cleanup_expired_rdp_access(registry_module=registry, run_process=run_process,
+                    windows=True, system_root=system_root, now=now + timedelta(seconds=1))
+            except Exception:
+                pass
         return {"status": "FAILED", "error_code": exc.code if _CODE_RE.fullmatch(exc.code) else "rdp_prepare_failed"}
     except (OSError, ValueError, TypeError):
+        if marker_saved and marker is not None:
+            marker["access_expires_at"] = now.astimezone(UTC).isoformat().replace("+00:00", "Z")
+            try:
+                _write_value(registry, registry.HKEY_LOCAL_MACHINE, _TERMINAL_SERVICES,
+                             _RDP_STATE_VALUE, json.dumps(marker, separators=(",", ":")), registry.REG_SZ)
+                cleanup_expired_rdp_access(registry_module=registry, run_process=run_process,
+                    windows=True, system_root=system_root, now=now + timedelta(seconds=1))
+            except Exception:
+                pass
         return {"status": "FAILED", "error_code": "rdp_prepare_failed"}

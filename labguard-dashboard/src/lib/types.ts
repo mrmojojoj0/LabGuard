@@ -21,6 +21,16 @@ export interface DeviceStatus {
   changed_at: string;
   connected: boolean;
 }
+export interface RdpAccessRequest {
+  id: string;
+  device_id: string;
+  hostname: string;
+  status: "PENDING" | "READY" | "FAILED" | "EXPIRED";
+  error_code: string | null;
+  created_at: string;
+  expires_at: string;
+  access_expires_at: string;
+}
 export interface TelemetryPartition {
   device: string;
   mountpoint: string;

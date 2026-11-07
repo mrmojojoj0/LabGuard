@@ -14,8 +14,9 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from urllib.parse import urlsplit
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from websockets.asyncio.client import ClientConnection, connect
 
@@ -25,6 +26,7 @@ from labguard_client.telemetry import collect_system_telemetry
 from labguard_client.software_inventory import batch_entries, collect_software_inventory, inventory_digest
 from labguard_client.software_management import (PackageManagerUnavailable, SoftwareJobOffer,
                                                  UnsupportedExecutionContext, execute_package_job)
+from labguard_client.rdp_access import cleanup_expired_rdp_access, prepare_rdp_access
 
 
 class AgentClient:
@@ -32,10 +34,11 @@ class AgentClient:
                  heartbeat_interval: float = 10.0, telemetry_interval_seconds: float = 30.0,
                  software_inventory_interval_seconds: float = 6 * 60 * 60,
                  timeout: float = 15.0, allow_insecure_dev: bool = False):
-        if not server_url.startswith(("https://", "http://")):
-            raise ValueError("Server URL must use HTTPS (HTTP is only for local development)")
-        if server_url.startswith("http://") and not allow_insecure_dev:
-            raise ValueError("Plain HTTP is disabled unless allow_insecure_dev is explicitly enabled")
+        parsed_server_url = urlsplit(server_url)
+        if (parsed_server_url.scheme not in {"http", "https"} or not parsed_server_url.hostname
+                or parsed_server_url.username or parsed_server_url.password
+                or parsed_server_url.query or parsed_server_url.fragment):
+            raise ValueError("Server URL must be a valid HTTP or HTTPS URL without credentials, query, or fragment")
         self.server_url = server_url.rstrip("/")
         self.identity = identity
         self.agent_version = agent_version
@@ -111,7 +114,8 @@ class AgentClient:
         return ack
 
     async def _read_session_acks(self, ws: ClientConnection, pending: dict[str, asyncio.Future],
-                                 inventory_requests: asyncio.Queue, job_offers: asyncio.Queue | None = None):
+                                 inventory_requests: asyncio.Queue, job_offers: asyncio.Queue | None = None,
+                                 rdp_requests: asyncio.Queue | None = None):
         while True:
             message = json.loads(await ws.recv())
             if message.get("type") == "server.software_job.offer":
@@ -130,6 +134,18 @@ class AgentClient:
                 payload = message.get("payload", {})
                 request_id = payload.get("request_id") if isinstance(payload, dict) else None
                 inventory_requests.put_nowait(request_id if isinstance(request_id, str) else None)
+                continue
+            if message.get("type") == "server.rdp.access.request":
+                if (message.get("protocol") != "labguard.agent"
+                        or message.get("schema_version") != 1
+                        or message.get("device_id") != self.identity.device_id
+                        or rdp_requests is None):
+                    logging.getLogger("labguard_client").warning("Rejected RDP request envelope")
+                    continue
+                try:
+                    rdp_requests.put_nowait(message.get("payload"))
+                except asyncio.QueueFull:
+                    logging.getLogger("labguard_client").warning("RDP request queue is full")
                 continue
             if message.get("type") != "server.ack":
                 continue
@@ -165,6 +181,7 @@ class AgentClient:
         send_lock = asyncio.Lock()
         inventory_requests: asyncio.Queue[str | None] = asyncio.Queue()
         job_offers: asyncio.Queue[dict] = asyncio.Queue(maxsize=8)
+        rdp_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=4)
 
         async def heartbeat_loop():
             while not await self._wait_or_stop(stop, self.heartbeat_interval):
@@ -218,14 +235,19 @@ class AgentClient:
                 except Exception as exc:
                     logger.exception("Software job processing failed (%s)", type(exc).__name__)
 
-        tasks = [asyncio.create_task(self._read_session_acks(ws, pending, inventory_requests, job_offers)),
+        async def rdp_access_loop():
+            while not stop.is_set():
+                payload = await rdp_requests.get()
+                await self._run_rdp_access_request(payload, ws, pending, send_lock)
+
+        tasks = [asyncio.create_task(self._read_session_acks(ws, pending, inventory_requests, job_offers, rdp_requests)),
                  asyncio.create_task(heartbeat_loop()), asyncio.create_task(telemetry_loop()),
                  asyncio.create_task(software_inventory_loop()),
-                 asyncio.create_task(software_job_loop()),
+                 asyncio.create_task(software_job_loop()), asyncio.create_task(rdp_access_loop()),
                  asyncio.create_task(stop.wait())]
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            if tasks[5] in done:
+            if tasks[6] in done:
                 return
             for task in done:
                 if task is tasks[0]:
@@ -493,6 +515,42 @@ class AgentClient:
         self._save_job_journal(jobs)
         await self._send_job_terminal(offer.job_id, final, ws, pending, send_lock)
 
+    async def _run_rdp_access_request(self, payload: dict, ws, pending, send_lock):
+        logger = logging.getLogger("labguard_client")
+        if not isinstance(payload, dict) or set(payload) != {"request_id", "expires_at", "access_expires_at"}:
+            logger.warning("Rejected malformed RDP access request")
+            return
+        try:
+            request_id = str(UUID(payload["request_id"]))
+            expires = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+            access_expires_at = datetime.fromisoformat(payload["access_expires_at"].replace("Z", "+00:00"))
+            if expires.astimezone(UTC) <= datetime.now(UTC):
+                result = {"status": "FAILED", "error_code": "rdp_request_expired"}
+            else:
+                result = await asyncio.to_thread(prepare_rdp_access, request_id,
+                    access_expires_at.isoformat(), now=datetime.now(UTC))
+        except (TypeError, ValueError, AttributeError):
+            logger.warning("Rejected invalid RDP access request payload")
+            return
+        try:
+            ack = await self._send_session_event(ws, "client.rdp.access.result", {
+                "request_id": request_id, "status": result["status"],
+                "error_code": result.get("error_code")}, pending, send_lock)
+            if not ack.get("accepted"):
+                logger.warning("RDP access result was rejected by server (%s)", ack.get("reason", "unknown"))
+        except Exception as exc:
+            logger.warning("Could not report RDP access result (%s)", type(exc).__name__)
+
+    async def _rdp_lease_cleanup_loop(self, stop: asyncio.Event):
+        logger = logging.getLogger("labguard_client")
+        while not stop.is_set():
+            try:
+                await asyncio.to_thread(cleanup_expired_rdp_access)
+            except Exception as exc:
+                logger.warning("Temporary RDP access cleanup failed (%s)", type(exc).__name__)
+            if await self._wait_or_stop(stop, 30):
+                break
+
     async def _wait_or_stop(self, stop: asyncio.Event, delay: float) -> bool:
         try:
             await asyncio.wait_for(stop.wait(), timeout=max(0.0, delay))
@@ -520,6 +578,7 @@ class AgentClient:
         logger = logging.getLogger("labguard_client")
         logger.info("Agent starting")
         attempt = 0
+        rdp_cleanup_task = asyncio.create_task(self._rdp_lease_cleanup_loop(stop))
         try:
             while not stop.is_set():
                 try:
@@ -544,6 +603,12 @@ class AgentClient:
                     if await self._wait_or_stop(stop, delay):
                         break
         finally:
+            rdp_cleanup_task.cancel()
+            await asyncio.gather(rdp_cleanup_task, return_exceptions=True)
+            try:
+                await asyncio.to_thread(cleanup_expired_rdp_access, force=True)
+            except Exception as exc:
+                logger.warning("Temporary RDP access shutdown cleanup failed (%s)", type(exc).__name__)
             if process_lock:
                 process_lock.release()
             logger.info("Agent stopped")

@@ -26,8 +26,8 @@ def main():
                      default=float(os.getenv("LABGUARD_TELEMETRY_INTERVAL_SECONDS", "30")))
     run.add_argument("--software-inventory-interval-seconds", type=float,
                      default=float(os.getenv("LABGUARD_SOFTWARE_INVENTORY_INTERVAL_SECONDS", "21600")))
-    run.add_argument("--insecure-dev", action="store_true", help="Allow plaintext HTTP for local development only")
-    enroll.add_argument("--insecure-dev", action="store_true", help="Allow plaintext HTTP for local development only")
+    run.add_argument("--insecure-dev", action="store_true", help="Legacy compatibility option; HTTP and HTTPS are accepted")
+    enroll.add_argument("--insecure-dev", action="store_true", help="Legacy compatibility option; HTTP and HTTPS are accepted")
     service = sub.add_parser("service", help="Prepare or manage the Windows Service")
     service.add_argument("action", choices=("prepare", "install", "uninstall", "start", "stop", "restart", "status"))
     service.add_argument("--server")
@@ -37,17 +37,15 @@ def main():
     service.add_argument("--software-inventory-interval-seconds", type=float,
                           default=float(os.getenv("LABGUARD_SOFTWARE_INVENTORY_INTERVAL_SECONDS", "21600")))
     service.add_argument("--insecure-dev", action="store_true",
-                         help="Allow plaintext HTTP for local development only (prepare/install required)")
+                         help="Legacy compatibility option; HTTP and HTTPS are accepted")
     args = parser.parse_args()
     state_dir = Path(args.state_dir)
     if args.command == "service":
-        if args.insecure_dev and args.action not in {"prepare", "install"}:
-            parser.error("service --insecure-dev is valid only with prepare or install")
         state_dir.mkdir(parents=True, exist_ok=True)
         _configure_logging(state_dir)
         if args.action == "prepare":
             if not args.server:
-                parser.error("service prepare requires --server https://... (or --insecure-dev for local development)")
+                parser.error("service prepare requires --server with an HTTP or HTTPS URL")
             from labguard_client.windows_service import prepare_service
             print(f"Prepared service configuration: {prepare_service(args.server, state_dir, args.telemetry_interval_seconds,
                                                                        args.software_inventory_interval_seconds,

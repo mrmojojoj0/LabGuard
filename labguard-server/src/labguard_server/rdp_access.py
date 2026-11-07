@@ -14,7 +14,7 @@ from labguard_server.schemas import RdpAccessResultIn
 from labguard_server.services import audit
 
 _HOST_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
-_HOST_RE = re.compile(rf"^(?=.{1,253}$){_HOST_LABEL}(?:\.{_HOST_LABEL})*\.?$")
+_HOST_RE = re.compile(rf"^(?=.{{1,253}}$){_HOST_LABEL}(?:\.{_HOST_LABEL})*\.?$")
 REQUEST_TTL = timedelta(minutes=2)
 ACCESS_TTL = timedelta(minutes=60)
 

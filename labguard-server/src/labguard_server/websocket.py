@@ -16,6 +16,8 @@ from labguard_server.software_inventory import record_software_inventory_batch
 from labguard_server.schemas import SoftwareJobEventIn
 from labguard_server.software_jobs import (dispatch_pending_software_jobs, record_software_job_event,
                                            software_job_allows_inventory)
+from labguard_server.rdp_access import record_rdp_access_result
+from labguard_server.schemas import RdpAccessResultIn
 
 router = APIRouter(prefix="/api/v1")
 MAX_FRAME_BYTES = 64 * 1024
@@ -75,6 +77,11 @@ def _persist_software_job_event(factory, device_id, sequence, event_type, payloa
         return record_software_job_event(db, device_id, sequence, event_type, payload)
 
 
+def _persist_rdp_result(factory, device_id, sequence, payload):
+    with factory() as db:
+        return record_rdp_access_result(db, device_id, sequence, payload)
+
+
 def _consume_invalid_telemetry(factory, device_id, sequence):
     with factory() as db:
         consume_rejected_telemetry_sequence(db, device_id, sequence)
@@ -121,6 +128,17 @@ async def request_software_inventory_refresh(application, device_id: UUID, reque
 async def send_software_job_offer(application, device_id: UUID, payload: dict) -> bool:
     websocket = application.state.active_devices.get(device_id)
     if websocket is None:
+        return False
+
+
+async def send_rdp_access_request(application, device_id: UUID, payload: dict) -> bool:
+    websocket = application.state.active_devices.get(device_id)
+    if websocket is None:
+        return False
+    try:
+        await _send(websocket, device_id, "server.rdp.access.request", payload)
+        return True
+    except (RuntimeError, WebSocketDisconnect):
         return False
     try:
         await _send(websocket, device_id, "server.software_job.offer", payload)
@@ -189,7 +207,7 @@ async def agent_session(websocket: WebSocket):
                 return
             if event.type not in {"client.heartbeat", "client.telemetry", "client.software_inventory",
                                   "client.job.accepted", "client.job.started", "client.job.progress",
-                                  "client.job.completed", "client.job.failed"}:
+                                  "client.job.completed", "client.job.failed", "client.rdp.access.result"}:
                 await websocket.close(code=4400, reason="unsupported_event")
                 return
             if event.type == "client.telemetry":
@@ -296,6 +314,30 @@ async def agent_session(websocket: WebSocket):
                     websocket.app.state.admin_events.publish({"type": "software.job",
                         "job_id": str(job_event.job_id), "device_id": str(device_id),
                         "status": result.get("status")})
+                await _send(websocket, device_id, "server.ack", {
+                    "event_id": str(event.event_id), **result})
+                continue
+            if event.type == "client.rdp.access.result":
+                try:
+                    rdp_result = RdpAccessResultIn.model_validate(event.payload)
+                except ValidationError:
+                    await _send(websocket, device_id, "server.ack", {
+                        "event_id": str(event.event_id), "accepted": False,
+                        "reason": "invalid_rdp_access_result"})
+                    continue
+                try:
+                    result = await asyncio.to_thread(_persist_rdp_result,
+                        websocket.app.state.session_factory, device_id, event.sequence, rdp_result)
+                except HTTPException:
+                    await websocket.close(code=4401, reason="device_not_authorized_or_replayed")
+                    return
+                except Exception:
+                    logging.getLogger("labguard_server.websocket").exception("Failed storing RDP access result")
+                    result = {"accepted": False, "reason": "rdp_access_storage_error"}
+                if result.get("accepted"):
+                    websocket.app.state.admin_events.publish({"type": "rdp.access",
+                        "request_id": result["request_id"], "device_id": str(device_id),
+                        "status": result["status"]})
                 await _send(websocket, device_id, "server.ack", {
                     "event_id": str(event.event_id), **result})
                 continue

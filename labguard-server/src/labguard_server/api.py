@@ -10,10 +10,12 @@ from sqlalchemy.orm import Session
 
 from labguard_server.db import get_db
 from labguard_server.models import (AuditEvent, Device, DeviceAuthChallenge, DeviceCredential, DevicePosition,
-                                    DeviceStatus, DeviceStatusEvent, Room, SoftwareCatalogPackage, SoftwareJob, now_utc)
+                                    DeviceStatus, DeviceStatusEvent, RdpAccessRequest, Room,
+                                    SoftwareCatalogPackage, SoftwareJob, now_utc)
 from labguard_server.schemas import (DeviceApproval, DeviceChallengeRequest, DeviceOut, DeviceTicketRequest, EnrollmentCodeOut, EnrollmentRequestIn,
                                      LayoutOut, LoginRequest, RoomCreate, RoomLayout, RoomOut, RoomPatch,
-                                     SoftwareCatalogPackageCreate, SoftwareJobCreate, WingetCatalogImport)
+                                     RdpAccessRequestOut, SoftwareCatalogPackageCreate, SoftwareJobCreate,
+                                     WingetCatalogImport)
 from labguard_server.security import csrf_protected, digest, require_role
 from labguard_server.services import (approve_device, audit, authenticate, create_enrollment_code, create_room,
                                       create_device_challenge, delete_device, issue_device_ticket, save_layout, submit_enrollment,
@@ -22,6 +24,8 @@ from labguard_server.telemetry import latest_telemetry, telemetry_history, telem
 from labguard_server.software_inventory import (device_software_items, global_software_list, inventory_status,
                                                 software_installations, software_summary)
 from labguard_server.websocket import request_software_inventory_refresh
+from labguard_server.websocket import send_rdp_access_request
+from labguard_server.rdp_access import create_rdp_access_request, expire_rdp_request, rdp_request_out
 from labguard_server.software_jobs import (catalog_out, create_software_job, dispatch_software_job,
                                            job_out)
 from labguard_server.winget_discovery import (WingetDiscoveryError, get_winget_package_metadata,
@@ -165,6 +169,42 @@ def device_status(device_id: UUID, request: Request, _admin=Depends(require_role
             "last_seen_at": device.last_seen_at.isoformat() if device.last_seen_at else None,
             "changed_at": status_row.changed_at.isoformat(),
             "connected": device_id in request.app.state.active_devices}
+
+
+@router.post("/devices/{device_id}/rdp/requests", response_model=RdpAccessRequestOut, status_code=202)
+async def request_device_rdp(device_id: UUID, request: Request,
+                             admin=Depends(require_role("LAB_ADMIN", csrf=True)),
+                             db: Session = Depends(get_db)):
+    if request.app.state.active_devices.get(device_id) is None:
+        raise HTTPException(status_code=409, detail={"code": "device_offline", "message": "The device must be online to prepare RDP"})
+    access_request = create_rdp_access_request(db, device_id, admin.id)
+    sent = await send_rdp_access_request(request.app, device_id, {
+        "request_id": str(access_request.id),
+        "expires_at": access_request.expires_at.isoformat(),
+        "access_expires_at": access_request.access_expires_at.isoformat(),
+    })
+    if not sent:
+        current = db.get(RdpAccessRequest, access_request.id)
+        if current is not None and current.status == "PENDING":
+            current.status = "FAILED"
+            current.error_code = "agent_unavailable"
+            db.commit()
+            db.refresh(current)
+        access_request = current or access_request
+    else:
+        request.app.state.admin_events.publish({"type": "rdp.access", "request_id": str(access_request.id),
+            "device_id": str(device_id), "status": "PENDING"})
+    return rdp_request_out(access_request)
+
+
+@router.get("/devices/{device_id}/rdp/requests/{request_id}", response_model=RdpAccessRequestOut)
+def get_device_rdp_request(device_id: UUID, request_id: UUID,
+                           _admin=Depends(require_role("LAB_ADMIN")), db: Session = Depends(get_db)):
+    access_request = db.scalar(select(RdpAccessRequest).where(
+        RdpAccessRequest.id == request_id, RdpAccessRequest.device_id == device_id))
+    if access_request is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "RDP request not found"})
+    return rdp_request_out(expire_rdp_request(db, access_request))
 
 
 @router.get("/devices/{device_id}/telemetry")

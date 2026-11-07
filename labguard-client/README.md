@@ -1,6 +1,6 @@
 # LabGuard Client
 
-Windows endpoint agent for authenticated device enrollment, heartbeat, telemetry, software inventory, and v0.6 individual approved WinGet/Chocolatey software jobs. It does not provide arbitrary remote execution, bulk deployment, process control, packet capture, or USB monitoring.
+Windows endpoint agent for authenticated device enrollment, heartbeat, telemetry, software inventory, individual WinGet/Chocolatey jobs, and LAB_ADMIN-requested temporary RDP access. It does not provide arbitrary remote execution, process control, packet capture, or USB monitoring.
 
 ## Install
 
@@ -30,7 +30,7 @@ After an administrator approves the pending UUID and assigns a name, start the a
 labguard-agent run --server https://labguard.example.edu
 ~~~
 
-The agent verifies TLS using the operating system trust store, proves possession of its Ed25519 private key, obtains a short-lived one-use WebSocket ticket, sends hello, and sends application heartbeats at the server-provided interval. It collects CPU, memory, storage, Windows/OS, uptime, and network interface metadata immediately after authentication and every 30 seconds by default. Configure the foreground interval with `--telemetry-interval-seconds` or `LABGUARD_TELEMETRY_INTERVAL_SECONDS` (10–3600 seconds); for a service, supply the value to `service prepare`. Collection runs off the heartbeat loop, and collection or telemetry rejection errors do not stop heartbeat operation. The collector does not inspect user files or browsing information. It reconnects with capped exponential backoff and jitter. Plain HTTP is rejected unless `--insecure-dev` is explicitly set for local development.
+The agent verifies TLS using the operating system trust store for HTTPS connections, proves possession of its Ed25519 private key, obtains a short-lived one-use WebSocket ticket, sends hello, and sends application heartbeats at the server-provided interval. It collects CPU, memory, storage, Windows/OS, uptime, and network interface metadata immediately after authentication and every 30 seconds by default. Configure the foreground interval with `--telemetry-interval-seconds` or `LABGUARD_TELEMETRY_INTERVAL_SECONDS` (10–3600 seconds); for a service, supply the value to `service prepare`. Collection runs off the heartbeat loop, and collection or telemetry rejection errors do not stop heartbeat operation. The collector does not inspect user files or browsing information. It reconnects with capped exponential backoff and jitter. Both HTTP and HTTPS server URLs are accepted; HTTPS remains certificate-verified.
 
 ## Windows Service
 
@@ -47,11 +47,11 @@ py -3.12 -m labguard_client.cli service status
 
 `prepare` requires the existing `%PROGRAMDATA%\LabGuard\identity.json`; it migrates DPAPI protection from current-user scope to machine scope while retaining the UUID, key, and sequence. It writes the server URL, state path, and transport policy to `service.json`. The protected ACL grants file/directory full access only to the enrolling account, LocalSystem, and Administrators, with file and directory inheritance retained. HTTPS certificate verification remains enabled. The service runs as LocalSystem, starts automatically with Windows, logs to `%PROGRAMDATA%\LabGuard\labguard-agent.log`, retries disconnected sessions, and stops by cancelling active async operations and closing the WebSocket. A cross-process lock beside the identity prevents a foreground process and service from using the same identity together.
 
-For local development only, `service prepare` accepts an HTTP URL when passed `--insecure-dev`, and that explicit opt-in is persisted in `service.json`. Installing a service configured for HTTP also requires `service install --insecure-dev`; later service start/restart uses the stored setting. HTTPS remains the default and always uses the operating system certificate trust store. Do not use HTTP for Krypton or production devices. Example local development setup:
+`service prepare` accepts HTTP or HTTPS URLs. Existing `--insecure-dev` flags remain accepted for compatibility but do not affect URL validation. HTTPS uses the operating system certificate trust store. Example local development setup:
 
 ~~~powershell
-py -3.12 -m labguard_client.cli service prepare --server http://127.0.0.1:8000 --insecure-dev
-py -3.12 -m labguard_client.cli service install --insecure-dev
+py -3.12 -m labguard_client.cli service prepare --server http://127.0.0.1:8000
+py -3.12 -m labguard_client.cli service install
 ~~~
 
 Manage it with `py -3.12 -m labguard_client.cli service start|stop|restart|status|uninstall`. Uninstall retains the identity and configuration. Installation is idempotent. Service management requires an elevated prompt. Do not run the foreground agent while the service is active.
@@ -104,3 +104,7 @@ Inventory reconciliation merges only unambiguous WinGet/Registry pairs using exa
 The agent accepts exact WinGet IDs selected through the server's fixed community-source search, plus existing approved Chocolatey jobs, over its existing authenticated WSS session. The server validates direct WinGet identity and selected version before persisting a job. Chocolatey requires the server's configured `CHOCOLATEY_SOURCE_URL`. Package manager invocations use fixed argument lists, no shell, bounded runtime/output, and a durable job journal. A fresh complete inventory scan verifies the requested install/uninstall before the agent reports success.
 
 Machine-scope jobs require an elevated administrator or LocalSystem. USER-scope WinGet jobs are refused in Session 0 under LocalSystem or any custom service account; they are supported only in a foreground interactive process. LabGuard does not impersonate a user or launch a helper. Chocolatey is machine-only and its existing approved catalog job path is unchanged. Uninstall is available only for a present inventory row with one exact supported package ID and scope; it no longer depends on a catalog approval. Fixed WinGet or existing Chocolatey adapters perform uninstall, and a complete fresh scan must verify the package is absent before success. Interactive-only uninstallers and incomplete scans fail safely. No registry uninstall command strings are run. Tests use mocked subprocesses; actual package operations require controlled Windows-host verification. See `../docs/LabGuard_Development_State.md` for remaining checks.
+
+## Temporary RDP access
+
+An authenticated LAB_ADMIN request arrives over the existing device-ticket WSS connection. The agent requires an elevated or LocalSystem token, rejects Windows Home and policy-disabled RDP, preserves the current `fDenyTSConnections` value, and creates fixed TCP/3389 firewall rules for the local subnet on Domain/Private profiles only. Network Level Authentication is unchanged. A machine registry marker stores the prior setting and lease expiry so cleanup continues after service restart. After 60 minutes the agent restores the previous RDP setting and removes only its own firewall rules. Repeated requests extend the active lease. Windows account credentials are never collected. Actual listener, firewall and timeout behavior requires controlled Windows endpoint validation.

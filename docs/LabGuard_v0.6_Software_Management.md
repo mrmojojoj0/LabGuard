@@ -3,7 +3,7 @@
 ## Review and deployment flow
 
 1. Apply `alembic upgrade head` to create the approved package catalog, explicit review status, and persistent job tables. The current head is `0006_catalog_review_status`.
-2. Set `CHOCOLATEY_SOURCE_URL` only when a managed HTTPS Chocolatey feed is configured. The URL may not contain credentials, a query, or a fragment. WinGet uses the `winget` community source.
+2. Set `CHOCOLATEY_SOURCE_URL` only when a managed HTTP or HTTPS Chocolatey feed is configured. The URL may not contain credentials, a query, or a fragment. WinGet uses the `winget` community source.
 3. Sign in as Super Admin, open **Software Deployment**, and add an exact WinGet or configured Chocolatey package identifier with publisher/description, version policy, and supported scope. Review the metadata and explicitly approve or reject the entry. Rejected entries remain visible for review but are hidden from device install choices. Chocolatey is machine-scope only.
 4. Open an approved device's Software tab, search the approved catalog, select Install, review scope/version and device identity, then confirm. Uninstall is available only for a present WinGet/Chocolatey inventory entry whose exact package ID matches an approved catalog entry. Registry-only entries are unsupported.
 5. Monitor the job from the same device Software tab. An offline device retains the job as PENDING until reconnect or expiry. Job results are persistent and audit-linked.

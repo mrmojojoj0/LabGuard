@@ -169,7 +169,7 @@ def test_chocolatey_install_and_uninstall_use_only_configured_source_and_exact_i
         def wait(self, **_kwargs):
             return 0
 
-    source = "https://packages.example.test/choco/v2/"
+    source = "http://packages.example.test/choco/v2/"
     install = offer(package_manager="CHOCO", source="CHOCO_CONFIGURED", source_url=source,
         version="3.2", installation_scope="MACHINE")
     result = execute_package_job(install, local_system=True, administrator=True, service_context=True,
@@ -184,6 +184,13 @@ def test_chocolatey_install_and_uninstall_use_only_configured_source_and_exact_i
         which=lambda _name: str(executable), environ={"ProgramData": str(tmp_path)}, popen=Process)
     assert result.returncode == 0
     assert calls[-1] == [str(executable), "uninstall", "Vendor.App", "--yes", "--no-progress", "--limit-output"]
+
+
+@pytest.mark.parametrize("source", ["http://packages.example.test/choco", "https://packages.example.test/choco"])
+def test_chocolatey_job_accepts_configured_http_and_https_sources(source):
+    parsed = offer(package_manager="CHOCO", source="CHOCO_CONFIGURED", source_url=source,
+                   installation_scope="MACHINE")
+    assert parsed.source_url == source
 
 
 def test_package_execution_timeout_and_cancellation_are_reported(monkeypatch):

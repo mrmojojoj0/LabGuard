@@ -18,6 +18,7 @@ import { useAuth } from "../auth/AuthProvider";
 import { canManageLabs } from "../auth/api";
 import { useToast } from "../../components/Toast";
 import { DeviceSoftware } from "../software/DeviceSoftware";
+import { DeviceRdpAccess } from "./DeviceRdpAccess";
 
 const tabs = [
   "Overview",
@@ -214,6 +215,8 @@ export function DeviceDetailPage() {
             </div>
           ) : tab === "Software" ? (
             <DeviceSoftware id={id} />
+          ) : tab === "Remote Access" ? (
+            canManageLabs(admin?.role) ? <DeviceRdpAccess deviceId={id} /> : <Panel><p className="p-4 text-[10px] text-[var(--color-muted)]">Remote Desktop access requires lab-admin access.</p></Panel>
           ) : (
             <ComingSoon
               title={`${tab} data isn’t available yet`}
