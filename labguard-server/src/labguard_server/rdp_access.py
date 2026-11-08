@@ -95,6 +95,7 @@ def record_rdp_access_result(db: Session, device_id: UUID, sequence: int,
         return {"accepted": False, "reason": "rdp_request_expired"}
     request.status = payload.status
     request.error_code = payload.error_code if payload.status == "FAILED" else None
+    request.rdp_username = payload.username if payload.status == "READY" else None
     audit(db, None, "rdp.access.prepared" if payload.status == "READY" else "rdp.access.failed",
           "rdp_access_request", str(request.id), {"device_id": str(device_id),
           "status": request.status, "error_code": request.error_code}, actor_type="DEVICE")
@@ -104,7 +105,7 @@ def record_rdp_access_result(db: Session, device_id: UUID, sequence: int,
 
 def rdp_request_out(request: RdpAccessRequest) -> dict:
     return {"id": str(request.id), "device_id": str(request.device_id),
-            "hostname": request.hostname, "status": request.status,
+            "hostname": request.hostname, "username": request.rdp_username, "status": request.status,
             "error_code": request.error_code, "created_at": request.created_at.isoformat(),
             "expires_at": request.expires_at.isoformat(),
             "access_expires_at": request.access_expires_at.isoformat()}

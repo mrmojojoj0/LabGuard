@@ -10,7 +10,7 @@ vi.mock("../../components/Toast", () => ({ useToast: () => mocks.toast }));
 
 beforeEach(() => {
   mocks.requestRdp.mockResolvedValue({ id: "request-1", device_id: "device-1", hostname: "LAB-PC-01", status: "PENDING", error_code: null, created_at: "2026-11-07T00:00:00Z", expires_at: "2026-11-07T00:02:00Z", access_expires_at: "2099-11-07T01:00:00Z" });
-  mocks.rdpRequest.mockResolvedValue({ id: "request-1", device_id: "device-1", hostname: "LAB-PC-01", status: "READY", error_code: null, created_at: "2026-11-07T00:00:00Z", expires_at: "2026-11-07T00:02:00Z", access_expires_at: "2099-11-07T01:00:00Z" });
+  mocks.rdpRequest.mockResolvedValue({ id: "request-1", device_id: "device-1", hostname: "LAB-PC-01", username: "LAB-PC-01\\student", status: "READY", error_code: null, created_at: "2026-11-07T00:00:00Z", expires_at: "2026-11-07T00:02:00Z", access_expires_at: "2099-11-07T01:00:00Z" });
 });
 afterEach(() => cleanup());
 
@@ -31,12 +31,15 @@ describe("device Remote Desktop handoff", () => {
     render(<QueryClientProvider client={client}><DeviceRdpAccess deviceId="device-1" /></QueryClientProvider>);
     await user.click(screen.getByRole("button", { name: "Request RDP access" }));
     expect((await screen.findByText(/Ready for/)).textContent).toContain("LAB-PC-01");
+    expect(screen.getByText(/Connect as/).textContent).toContain("LAB-PC-01\\student");
     await user.click(screen.getByRole("button", { name: "Download Windows RDP file" }));
     expect(mocks.requestRdp).toHaveBeenCalledWith("device-1");
     expect(mocks.rdpRequest).toHaveBeenCalledWith("device-1", "request-1");
     expect(createUrl).toHaveBeenCalledWith(expect.any(Blob));
+    const fileBlob = createUrl.mock.calls[0][0] as Blob;
+    expect(await fileBlob.text()).toContain("username:s:LAB-PC-01\\student");
     expect(click).toHaveBeenCalled();
-    expect(screen.getByText(/open it from this PC/)).toBeTruthy();
+    expect(screen.getByText(/open it from this PC/i)).toBeTruthy();
     createUrl.mockRestore();
     click.mockRestore();
   });

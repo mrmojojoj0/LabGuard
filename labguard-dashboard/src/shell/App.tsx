@@ -41,6 +41,7 @@ import { SettingsPage } from "../features/settings/SettingsPage";
 import { AuditPage } from "../features/audit/AuditPage";
 import { SoftwarePage } from "../features/software/SoftwarePage";
 import { SoftwareDeploymentPage } from "../features/software/SoftwareDeploymentPage";
+import { ProcessMonitoringPage } from "../features/devices/ProcessMonitoringPage";
 import { ComingSoon } from "../components/ui";
 import type { Device } from "../lib/types";
 
@@ -403,7 +404,7 @@ function RoutedShell() {
           />
           <Route
             path="/processes"
-            element={<Placeholder title="Process Monitoring" />}
+            element={<ProcessMonitoringPage />}
           />
           <Route
             path="/network"

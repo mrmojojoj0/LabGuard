@@ -108,6 +108,8 @@ class DeviceTelemetryLatest(Base):
     build_number: Mapped[str | None] = mapped_column(String(64))
     architecture: Mapped[str] = mapped_column(String(64))
     hostname: Mapped[str] = mapped_column(String(255))
+    username: Mapped[str | None] = mapped_column(String(256))
+    agent_account: Mapped[str | None] = mapped_column(String(256))
     boot_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     uptime_seconds: Mapped[float] = mapped_column(Float)
     network_interfaces: Mapped[list] = mapped_column(JSON)
@@ -302,8 +304,32 @@ class RdpAccessRequest(Base):
     device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
     requested_by: Mapped[UUID | None] = mapped_column(ForeignKey("administrators.id", ondelete="SET NULL"), index=True)
     hostname: Mapped[str] = mapped_column(String(255))
+    rdp_username: Mapped[str | None] = mapped_column(String(256))
     status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
     error_code: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     access_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class DeviceProcessRequest(Base):
+    __tablename__ = "device_process_requests"
+    __table_args__ = (
+        CheckConstraint("operation IN ('LIST', 'TERMINATE', 'KILL')", name="ck_device_process_requests_operation"),
+        CheckConstraint("status IN ('PENDING', 'COMPLETE', 'FAILED', 'EXPIRED')", name="ck_device_process_requests_status"),
+        Index("ix_device_process_requests_device_status", "device_id", "status"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    requested_by: Mapped[UUID | None] = mapped_column(ForeignKey("administrators.id", ondelete="SET NULL"), index=True)
+    operation: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    target_pid: Mapped[int | None] = mapped_column(Integer)
+    target_created_at_us: Mapped[int | None] = mapped_column(BigInteger)
+    result_code: Mapped[str | None] = mapped_column(String(64))
+    process_items: Mapped[list | None] = mapped_column(JSON)
+    received_batches: Mapped[dict | None] = mapped_column(JSON)
+    batch_count: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -10,12 +10,12 @@ from sqlalchemy.orm import Session
 
 from labguard_server.db import get_db
 from labguard_server.models import (AuditEvent, Device, DeviceAuthChallenge, DeviceCredential, DevicePosition,
-                                    DeviceStatus, DeviceStatusEvent, RdpAccessRequest, Room,
+                                    DeviceProcessRequest, DeviceStatus, DeviceStatusEvent, RdpAccessRequest, Room,
                                     SoftwareCatalogPackage, SoftwareJob, now_utc)
 from labguard_server.schemas import (DeviceApproval, DeviceChallengeRequest, DeviceOut, DeviceTicketRequest, EnrollmentCodeOut, EnrollmentRequestIn,
                                      LayoutOut, LoginRequest, RoomCreate, RoomLayout, RoomOut, RoomPatch,
                                      RdpAccessRequestOut, SoftwareCatalogPackageCreate, SoftwareJobCreate,
-                                     WingetCatalogImport)
+                                     ProcessRequestCreate, ProcessRequestOut, WingetCatalogImport)
 from labguard_server.security import csrf_protected, digest, require_role
 from labguard_server.services import (approve_device, audit, authenticate, create_enrollment_code, create_room,
                                       create_device_challenge, delete_device, issue_device_ticket, save_layout, submit_enrollment,
@@ -28,6 +28,9 @@ from labguard_server.websocket import send_rdp_access_request
 from labguard_server.rdp_access import create_rdp_access_request, expire_rdp_request, rdp_request_out
 from labguard_server.software_jobs import (catalog_out, create_software_job, dispatch_software_job,
                                            job_out)
+from labguard_server.process_management import (create_process_request, expire_process_request,
+                                                process_request_out)
+from labguard_server.websocket import send_process_request
 from labguard_server.winget_discovery import (WingetDiscoveryError, get_winget_package_metadata,
                                               get_winget_version, list_winget_sources, search_winget_packages)
 
@@ -205,6 +208,40 @@ def get_device_rdp_request(device_id: UUID, request_id: UUID,
     if access_request is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "RDP request not found"})
     return rdp_request_out(expire_rdp_request(db, access_request))
+
+
+@router.post("/devices/{device_id}/process-requests", response_model=ProcessRequestOut, status_code=202)
+async def request_device_process_operation(device_id: UUID, body: ProcessRequestCreate, request: Request,
+                                           admin=Depends(require_role("LAB_ADMIN", csrf=True)),
+                                           db: Session = Depends(get_db)):
+    if request.app.state.active_devices.get(device_id) is None:
+        raise HTTPException(status_code=409, detail={"code": "device_offline", "message": "The device must be online to inspect or manage processes"})
+    process_request = create_process_request(db, device_id, admin.id, body)
+    sent = await send_process_request(request.app, device_id, {
+        "request_id": str(process_request.id), "operation": process_request.operation,
+        "target_pid": process_request.target_pid,
+        "target_created_at_us": process_request.target_created_at_us,
+        "expires_at": process_request.expires_at.isoformat(),
+    })
+    if not sent:
+        process_request.status = "FAILED"
+        process_request.result_code = "agent_unavailable"
+        process_request.completed_at = now_utc()
+        db.commit()
+        db.refresh(process_request)
+    return process_request_out(process_request)
+
+
+@router.get("/devices/{device_id}/process-requests/{request_id}", response_model=ProcessRequestOut)
+def get_device_process_request(device_id: UUID, request_id: UUID,
+                              _admin=Depends(require_role("LAB_ADMIN")), db: Session = Depends(get_db)):
+    process_request = db.scalar(select(DeviceProcessRequest).where(
+        DeviceProcessRequest.id == request_id,
+        DeviceProcessRequest.device_id == device_id,
+    ))
+    if process_request is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Process request not found"})
+    return process_request_out(expire_process_request(db, process_request))
 
 
 @router.get("/devices/{device_id}/telemetry")

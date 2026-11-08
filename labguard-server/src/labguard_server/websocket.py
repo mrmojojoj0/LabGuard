@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
-from labguard_server.models import now_utc
+from labguard_server.models import DeviceProcessRequest, now_utc
 from labguard_server.services import claim_device_ticket, record_agent_event
 from labguard_server.schemas import TelemetrySnapshotIn
 from labguard_server.telemetry import consume_rejected_telemetry_sequence, purge_expired_telemetry, record_telemetry
@@ -18,6 +18,8 @@ from labguard_server.software_jobs import (dispatch_pending_software_jobs, recor
                                            software_job_allows_inventory)
 from labguard_server.rdp_access import record_rdp_access_result
 from labguard_server.schemas import RdpAccessResultIn
+from labguard_server.process_management import record_process_result
+from labguard_server.schemas import ProcessResultIn
 
 router = APIRouter(prefix="/api/v1")
 MAX_FRAME_BYTES = 64 * 1024
@@ -82,6 +84,11 @@ def _persist_rdp_result(factory, device_id, sequence, payload):
         return record_rdp_access_result(db, device_id, sequence, payload)
 
 
+def _persist_process_result(factory, device_id, sequence, payload):
+    with factory() as db:
+        return record_process_result(db, device_id, sequence, payload)
+
+
 def _consume_invalid_telemetry(factory, device_id, sequence):
     with factory() as db:
         consume_rejected_telemetry_sequence(db, device_id, sequence)
@@ -129,6 +136,11 @@ async def send_software_job_offer(application, device_id: UUID, payload: dict) -
     websocket = application.state.active_devices.get(device_id)
     if websocket is None:
         return False
+    try:
+        await _send(websocket, device_id, "server.software_job.offer", payload)
+        return True
+    except (RuntimeError, WebSocketDisconnect):
+        return False
 
 
 async def send_rdp_access_request(application, device_id: UUID, payload: dict) -> bool:
@@ -140,11 +152,34 @@ async def send_rdp_access_request(application, device_id: UUID, payload: dict) -
         return True
     except (RuntimeError, WebSocketDisconnect):
         return False
+
+
+async def send_process_request(application, device_id: UUID, payload: dict) -> bool:
+    websocket = application.state.active_devices.get(device_id)
+    if websocket is None:
+        return False
     try:
-        await _send(websocket, device_id, "server.software_job.offer", payload)
+        await _send(websocket, device_id, "server.process.request", payload)
         return True
     except (RuntimeError, WebSocketDisconnect):
         return False
+
+
+async def dispatch_pending_process_requests(application, device_id: UUID) -> None:
+    with application.state.session_factory() as db:
+        now = now_utc()
+        pending = db.query(DeviceProcessRequest).filter(
+            DeviceProcessRequest.device_id == device_id,
+            DeviceProcessRequest.status == "PENDING",
+            DeviceProcessRequest.expires_at > now,
+        ).order_by(DeviceProcessRequest.created_at).all()
+        items = [{"request_id": str(row.id), "operation": row.operation,
+                  "target_pid": row.target_pid,
+                  "target_created_at_us": row.target_created_at_us,
+                  "expires_at": row.expires_at.isoformat()} for row in pending]
+    for payload in items:
+        if not await send_process_request(application, device_id, payload):
+            break
 
 
 @router.websocket("/agent/session")
@@ -194,6 +229,7 @@ async def agent_session(websocket: WebSocket):
                     "offline_after_seconds": settings.offline_after_seconds, "protocol_version": 1})
         await _send(websocket, device_id, "server.ack", {"event_type": "client.hello", "accepted": True, "server_time": now_utc().isoformat()})
         await dispatch_pending_software_jobs(websocket.app, device_id)
+        await dispatch_pending_process_requests(websocket.app, device_id)
 
         while True:
             raw = await websocket.receive_text()
@@ -207,7 +243,8 @@ async def agent_session(websocket: WebSocket):
                 return
             if event.type not in {"client.heartbeat", "client.telemetry", "client.software_inventory",
                                   "client.job.accepted", "client.job.started", "client.job.progress",
-                                  "client.job.completed", "client.job.failed", "client.rdp.access.result"}:
+                                  "client.job.completed", "client.job.failed", "client.rdp.access.result",
+                                  "client.process.result"}:
                 await websocket.close(code=4400, reason="unsupported_event")
                 return
             if event.type == "client.telemetry":
@@ -338,6 +375,29 @@ async def agent_session(websocket: WebSocket):
                     websocket.app.state.admin_events.publish({"type": "rdp.access",
                         "request_id": result["request_id"], "device_id": str(device_id),
                         "status": result["status"]})
+                await _send(websocket, device_id, "server.ack", {
+                    "event_id": str(event.event_id), **result})
+                continue
+            if event.type == "client.process.result":
+                try:
+                    process_result = ProcessResultIn.model_validate(event.payload)
+                except ValidationError:
+                    await _send(websocket, device_id, "server.ack", {
+                        "event_id": str(event.event_id), "accepted": False,
+                        "reason": "invalid_process_result"})
+                    continue
+                try:
+                    result = await asyncio.to_thread(_persist_process_result,
+                        websocket.app.state.session_factory, device_id, event.sequence, process_result)
+                except HTTPException:
+                    await websocket.close(code=4401, reason="device_not_authorized_or_replayed")
+                    return
+                except Exception:
+                    logging.getLogger("labguard_server.websocket").exception("Failed storing process operation result")
+                    result = {"accepted": False, "reason": "process_result_storage_error"}
+                if result.get("accepted"):
+                    websocket.app.state.admin_events.publish({"type": "device.process", "device_id": str(device_id),
+                        "request_id": str(process_result.request_id), "status": result.get("status")})
                 await _send(websocket, device_id, "server.ack", {
                     "event_id": str(event.event_id), **result})
                 continue

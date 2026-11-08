@@ -15,18 +15,19 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from urllib.parse import urlsplit
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from websockets.asyncio.client import ClientConnection, connect
 
 from labguard_client.identity import DeviceIdentity
 from labguard_client.instance import IdentityProcessLock
-from labguard_client.telemetry import collect_system_telemetry
+from labguard_client.telemetry import active_windows_username, collect_system_telemetry
 from labguard_client.software_inventory import batch_entries, collect_software_inventory, inventory_digest
 from labguard_client.software_management import (PackageManagerUnavailable, SoftwareJobOffer,
                                                  UnsupportedExecutionContext, execute_package_job)
 from labguard_client.rdp_access import cleanup_expired_rdp_access, prepare_rdp_access
+from labguard_client.process_control import MAX_PROCESSES, list_processes, terminate_process
 
 
 class AgentClient:
@@ -115,7 +116,8 @@ class AgentClient:
 
     async def _read_session_acks(self, ws: ClientConnection, pending: dict[str, asyncio.Future],
                                  inventory_requests: asyncio.Queue, job_offers: asyncio.Queue | None = None,
-                                 rdp_requests: asyncio.Queue | None = None):
+                                 rdp_requests: asyncio.Queue | None = None,
+                                 process_requests: asyncio.Queue | None = None):
         while True:
             message = json.loads(await ws.recv())
             if message.get("type") == "server.software_job.offer":
@@ -146,6 +148,18 @@ class AgentClient:
                     rdp_requests.put_nowait(message.get("payload"))
                 except asyncio.QueueFull:
                     logging.getLogger("labguard_client").warning("RDP request queue is full")
+                continue
+            if message.get("type") == "server.process.request":
+                if (message.get("protocol") != "labguard.agent"
+                        or message.get("schema_version") != 1
+                        or message.get("device_id") != self.identity.device_id
+                        or process_requests is None):
+                    logging.getLogger("labguard_client").warning("Rejected process request envelope")
+                    continue
+                try:
+                    process_requests.put_nowait(message.get("payload"))
+                except asyncio.QueueFull:
+                    logging.getLogger("labguard_client").warning("Process request queue is full")
                 continue
             if message.get("type") != "server.ack":
                 continue
@@ -182,6 +196,7 @@ class AgentClient:
         inventory_requests: asyncio.Queue[str | None] = asyncio.Queue()
         job_offers: asyncio.Queue[dict] = asyncio.Queue(maxsize=8)
         rdp_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=4)
+        process_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=4)
 
         async def heartbeat_loop():
             while not await self._wait_or_stop(stop, self.heartbeat_interval):
@@ -240,14 +255,25 @@ class AgentClient:
                 payload = await rdp_requests.get()
                 await self._run_rdp_access_request(payload, ws, pending, send_lock)
 
-        tasks = [asyncio.create_task(self._read_session_acks(ws, pending, inventory_requests, job_offers, rdp_requests)),
+        async def process_request_loop():
+            while not stop.is_set():
+                payload = await process_requests.get()
+                try:
+                    await self._run_process_request(payload, ws, pending, send_lock)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.exception("Process request failed (%s)", type(exc).__name__)
+
+        tasks = [asyncio.create_task(self._read_session_acks(ws, pending, inventory_requests, job_offers, rdp_requests, process_requests)),
                  asyncio.create_task(heartbeat_loop()), asyncio.create_task(telemetry_loop()),
                  asyncio.create_task(software_inventory_loop()),
                  asyncio.create_task(software_job_loop()), asyncio.create_task(rdp_access_loop()),
+                 asyncio.create_task(process_request_loop()),
                  asyncio.create_task(stop.wait())]
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            if tasks[6] in done:
+            if tasks[7] in done:
                 return
             for task in done:
                 if task is tasks[0]:
@@ -533,13 +559,84 @@ class AgentClient:
             logger.warning("Rejected invalid RDP access request payload")
             return
         try:
-            ack = await self._send_session_event(ws, "client.rdp.access.result", {
-                "request_id": request_id, "status": result["status"],
-                "error_code": result.get("error_code")}, pending, send_lock)
+            result_payload = {"request_id": request_id, "status": result["status"],
+                              "error_code": result.get("error_code")}
+            username = await asyncio.to_thread(active_windows_username)
+            if username is not None and result["status"] == "READY":
+                result_payload["username"] = username
+            ack = await self._send_session_event(ws, "client.rdp.access.result",
+                result_payload, pending, send_lock)
             if not ack.get("accepted"):
                 logger.warning("RDP access result was rejected by server (%s)", ack.get("reason", "unknown"))
         except Exception as exc:
             logger.warning("Could not report RDP access result (%s)", type(exc).__name__)
+
+    async def _run_process_request(self, payload: dict, ws, pending, send_lock):
+        logger = logging.getLogger("labguard_client")
+        expected = {"request_id", "operation", "target_pid", "target_created_at_us", "expires_at"}
+        if not isinstance(payload, dict) or set(payload) != expected:
+            logger.warning("Rejected malformed process request")
+            return
+        try:
+            request_id = str(UUID(payload["request_id"]))
+            operation = payload["operation"]
+            expires = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+            if operation not in {"LIST", "TERMINATE", "KILL"}:
+                raise ValueError("unsupported operation")
+            now = datetime.now(UTC)
+            if expires.astimezone(UTC) > now + timedelta(minutes=2):
+                raise ValueError("request expiry exceeds the supported window")
+            if expires.astimezone(UTC) <= now:
+                result_code = "request_expired"
+                processes = []
+                batch_count = 1
+            elif operation == "LIST":
+                if payload["target_pid"] is not None or payload["target_created_at_us"] is not None:
+                    raise ValueError("list request has an unexpected target")
+                result_code = None
+                try:
+                    processes = await asyncio.to_thread(list_processes, limit=MAX_PROCESSES + 1)
+                except Exception:
+                    processes = []
+                    result_code = "process_list_failed"
+                if result_code is None and len(processes) > MAX_PROCESSES:
+                    result_code = "process_list_truncated"
+                    processes = processes[:MAX_PROCESSES]
+                batch_size = 8
+                batches = [processes[index:index + batch_size]
+                           for index in range(0, len(processes), batch_size)] or [[]]
+                batch_count = len(batches)
+            else:
+                pid, created_at_us = payload["target_pid"], payload["target_created_at_us"]
+                if (not isinstance(pid, int) or isinstance(pid, bool) or not 1 <= pid <= 2_147_483_647
+                        or not isinstance(created_at_us, int) or isinstance(created_at_us, bool)
+                        or created_at_us <= 0):
+                    raise ValueError("invalid process identity")
+                result_code = await asyncio.to_thread(terminate_process, pid, created_at_us,
+                                                     force=operation == "KILL")
+                processes = []
+                batch_count = 1
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            logger.warning("Rejected invalid process request payload")
+            return
+
+        try:
+            for batch_index in range(batch_count):
+                result_payload = {
+                    "request_id": request_id,
+                    "batch_index": batch_index,
+                    "batch_count": batch_count,
+                    "processes": batches[batch_index] if operation == "LIST"
+                        and result_code not in {"process_list_failed", "request_expired"} else [],
+                    "result_code": result_code,
+                }
+                ack = await self._send_session_event(ws, "client.process.result",
+                                                     result_payload, pending, send_lock)
+                if not ack.get("accepted"):
+                    logger.warning("Process result was rejected by server (%s)", ack.get("reason", "unknown"))
+                    break
+        except Exception as exc:
+            logger.warning("Could not report process result (%s)", type(exc).__name__)
 
     async def _rdp_lease_cleanup_loop(self, stop: asyncio.Event):
         logger = logging.getLogger("labguard_client")

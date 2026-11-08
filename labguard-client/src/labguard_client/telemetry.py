@@ -2,10 +2,28 @@ from __future__ import annotations
 
 import platform
 import socket
+import subprocess
 import time
 from datetime import UTC, datetime
 
 import psutil
+
+
+def agent_account_name() -> str | None:
+    """Return the account running the endpoint agent using the fixed whoami command."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        result = subprocess.run(
+            ["whoami"], capture_output=True, text=True, timeout=5,
+            check=True, shell=False,
+        )
+        value = result.stdout.strip()
+        if not value or len(value) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            return None
+        return value
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
 
 
 def _windows_edition() -> str | None:
@@ -32,6 +50,43 @@ def _processor_name() -> str | None:
         except (OSError, ImportError):
             return None
     return None
+
+
+def active_windows_username() -> str | None:
+    """Return the active console account as DOMAIN\\user, including in Session 0."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import ctypes
+
+        wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.WTSGetActiveConsoleSessionId.restype = ctypes.c_ulong
+        session_id = int(kernel32.WTSGetActiveConsoleSessionId())
+        if session_id == 0xFFFFFFFF:
+            return None
+        values: dict[int, str] = {}
+        for info_class in (5, 7):  # WTSUserName, WTSDomainName
+            buffer = ctypes.c_void_p()
+            byte_count = ctypes.c_ulong()
+            if not wts.WTSQuerySessionInformationW(
+                    None, session_id, info_class, ctypes.byref(buffer), ctypes.byref(byte_count)):
+                return None
+            try:
+                values[info_class] = ctypes.wstring_at(buffer.value) if buffer.value else ""
+            finally:
+                wts.WTSFreeMemory(buffer)
+        username = values.get(5, "").strip()
+        domain = values.get(7, "").strip()
+        if (not username or len(username) > 128 or len(domain) > 128
+                or any(ord(char) < 32 or ord(char) == 127 for char in username + domain)):
+            return None
+        if not domain or domain == ".":
+            domain = socket.gethostname()
+        qualified = f"{domain}\\{username}"
+        return qualified[:256] if len(qualified) <= 256 else None
+    except (AttributeError, OSError, ValueError, TypeError):
+        return None
 
 
 def collect_system_telemetry() -> dict:
@@ -97,7 +152,9 @@ def collect_system_telemetry() -> dict:
         "storage_partitions": partitions,
         "operating_system": {"edition": _windows_edition(), "version": windows_version or None,
                              "build_number": build or None, "architecture": platform.machine() or "unknown",
-                             "hostname": socket.gethostname()[:255]},
+                             "hostname": socket.gethostname()[:255],
+                             "username": active_windows_username(),
+                             "agent_account": agent_account_name()},
         "boot_time": datetime.fromtimestamp(boot_time, UTC).isoformat(),
         "uptime_seconds": max(0.0, now - boot_time),
         "network_interfaces": interfaces,

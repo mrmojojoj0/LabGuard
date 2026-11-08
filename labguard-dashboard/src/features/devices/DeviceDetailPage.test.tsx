@@ -8,13 +8,14 @@ import { DeviceDetailPage } from "./DeviceDetailPage";
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   status: vi.fn(),
+  telemetry: vi.fn(),
   remove: vi.fn(),
   toast: vi.fn(),
   role: { value: "LAB_ADMIN" as string },
 }));
 
 vi.mock("./api", () => ({
-  devicesApi: { list: mocks.list, status: mocks.status, remove: mocks.remove },
+  devicesApi: { list: mocks.list, status: mocks.status, telemetry: mocks.telemetry, remove: mocks.remove },
 }));
 vi.mock("../auth/AuthProvider", () => ({
   useAuth: () => ({
@@ -70,12 +71,18 @@ beforeEach(() => {
     changed_at: new Date().toISOString(),
     connected: false,
   });
+  mocks.telemetry.mockResolvedValue({ snapshot: { operating_system: { username: "LAB-PC-01\\student" } } });
   mocks.remove.mockReset();
   mocks.toast.mockReset();
 });
 afterEach(() => cleanup());
 
 describe("device deletion", () => {
+  it("shows the endpoint-reported username in device information", async () => {
+    renderPage();
+    expect(await screen.findByText("LAB-PC-01\\student")).toBeTruthy();
+  });
+
   it("confirms identity and permanence, prevents double submission, then clears and refreshes device data", async () => {
     const user = userEvent.setup();
     const queryClient = new QueryClient({

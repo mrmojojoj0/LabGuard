@@ -45,6 +45,7 @@ def record_telemetry(db: Session, device_id: UUID, sequence: int, payload: Telem
         "storage_partitions": partitions, "windows_edition": os_info.edition,
         "os_version": os_info.version, "build_number": os_info.build_number,
         "architecture": os_info.architecture, "hostname": os_info.hostname,
+        "username": os_info.username, "agent_account": os_info.agent_account,
         "boot_time": _utc(payload.boot_time), "uptime_seconds": payload.uptime_seconds,
         "network_interfaces": interfaces,
     }
@@ -100,7 +101,8 @@ def latest_telemetry(db: Session, device_id: UUID, stale_after_seconds: int):
         "storage_partitions": latest.storage_partitions,
         "operating_system": {"edition": latest.windows_edition, "version": latest.os_version,
                              "build_number": latest.build_number, "architecture": latest.architecture,
-                             "hostname": latest.hostname},
+                             "hostname": latest.hostname, "username": latest.username,
+                             "agent_account": latest.agent_account},
         "boot_time": latest.boot_time.isoformat(), "uptime_seconds": latest.uptime_seconds,
         "network_interfaces": latest.network_interfaces,
     }

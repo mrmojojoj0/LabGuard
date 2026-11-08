@@ -3,7 +3,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import select
 
-from labguard_server.models import (AuditEvent, DeviceStatus, RdpAccessRequest)
+from labguard_server.models import (AuditEvent, DeviceStatus, RdpAccessRequest, now_utc)
 from labguard_server.rdp_access import create_rdp_access_request, hostname_is_safe, record_rdp_access_result
 from labguard_server.schemas import RdpAccessResultIn
 from tests.conftest import login
@@ -96,14 +96,16 @@ def test_agent_rdp_result_is_device_bound_sequenced_and_audited(client):
     with client.app.state.session_factory.begin() as db:
         status = db.get(DeviceStatus, device_id)
         status.agent_state = "ONLINE"
+        status.last_heartbeat_at = now_utc()
     with client.app.state.session_factory() as db:
         request = create_rdp_access_request(db, device_id, UUID(client.get("/api/v1/auth/me").json()["id"]))
         request_id = request.id
     with client.app.state.session_factory() as db:
         result = record_rdp_access_result(db, device_id, 1,
-            RdpAccessResultIn(request_id=request_id, status="READY"))
+            RdpAccessResultIn(request_id=request_id, status="READY", username="RDP-LAB-PC\\student"))
         assert result == {"accepted": True, "status": "READY", "request_id": str(request_id)}
         assert db.get(RdpAccessRequest, request_id).status == "READY"
+        assert db.get(RdpAccessRequest, request_id).rdp_username == "RDP-LAB-PC\\student"
         event = db.scalar(select(AuditEvent).where(AuditEvent.action == "rdp.access.prepared"))
         assert event is not None and event.actor_type == "DEVICE"
     with client.app.state.session_factory() as db:

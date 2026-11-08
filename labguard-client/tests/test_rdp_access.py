@@ -150,6 +150,7 @@ def test_agent_reports_typed_rdp_result_without_passing_windows_credentials(monk
     client = AgentClient.__new__(AgentClient)
     monkeypatch.setattr(agent_module, "prepare_rdp_access",
         lambda *_args, **_kwargs: {"status": "READY", "error_code": None})
+    monkeypatch.setattr(agent_module, "active_windows_username", lambda: "LAB-PC-01\\student")
 
     async def send(_ws, event_type, payload, _pending, _send_lock):
         sent.append((event_type, payload))
@@ -163,5 +164,6 @@ def test_agent_reports_typed_rdp_result_without_passing_windows_credentials(monk
     }, object(), {}, asyncio.Lock()))
     assert sent == [("client.rdp.access.result", {
         "request_id": request_id, "status": "READY", "error_code": None,
+        "username": "LAB-PC-01\\student",
     })]
     assert all("password" not in key.casefold() for _event, payload in sent for key in payload)

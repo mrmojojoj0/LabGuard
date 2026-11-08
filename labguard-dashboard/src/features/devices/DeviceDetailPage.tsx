@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Radio, ShieldCheck, Trash2 } from "lucide-react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { devicesApi } from "./api";
 import { SystemTelemetry } from "./SystemTelemetry";
 import {
@@ -19,6 +19,8 @@ import { canManageLabs } from "../auth/api";
 import { useToast } from "../../components/Toast";
 import { DeviceSoftware } from "../software/DeviceSoftware";
 import { DeviceRdpAccess } from "./DeviceRdpAccess";
+import { DeviceProcesses } from "./DeviceProcesses";
+import { shortWindowsUsername } from "./username";
 
 const tabs = [
   "Overview",
@@ -31,7 +33,8 @@ const tabs = [
 ];
 export function DeviceDetailPage() {
   const { id = "" } = useParams();
-  const [tab, setTab] = useState("Overview");
+  const [searchParams] = useSearchParams();
+  const [tab, setTab] = useState(searchParams.get("tab") === "Processes" ? "Processes" : "Overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const { admin } = useAuth();
   const toast = useToast();
@@ -42,6 +45,11 @@ export function DeviceDetailPage() {
     queryKey: ["device-status", id],
     queryFn: () => devicesApi.status(id),
     refetchInterval: 20_000,
+  });
+  const telemetry = useQuery({
+    queryKey: ["telemetry", id],
+    queryFn: () => devicesApi.telemetry(id),
+    refetchInterval: 30_000,
   });
   const device = devices.data?.find((d) => d.id === id);
   const deleteDevice = useMutation({
@@ -147,7 +155,7 @@ export function DeviceDetailPage() {
                 key={item}
               >
                 {item}
-                {!["Overview", "Software"].includes(item) && (
+                {!["Overview", "Software", "Remote Access"].includes(item) && (
                   <span className="ml-1 rounded bg-[var(--color-surface-subtle)] px-1 py-0.5 text-[7px] text-[var(--color-muted)]">
                     SOON
                   </span>
@@ -161,6 +169,7 @@ export function DeviceDetailPage() {
                 <PanelTitle>Device information</PanelTitle>
                 {detailRows([
                   ["Hostname", device.hostname],
+                  ["Username", shortWindowsUsername(telemetry.data?.snapshot?.operating_system.username) ?? undefined],
                   ["Assigned name", device.assigned_name ?? "Not assigned"],
                   ["Device UUID", device.id],
                   ["Enrollment", device.enrollment_state],
@@ -217,6 +226,8 @@ export function DeviceDetailPage() {
             <DeviceSoftware id={id} />
           ) : tab === "Remote Access" ? (
             canManageLabs(admin?.role) ? <DeviceRdpAccess deviceId={id} /> : <Panel><p className="p-4 text-[10px] text-[var(--color-muted)]">Remote Desktop access requires lab-admin access.</p></Panel>
+          ) : tab === "Processes" ? (
+            canManageLabs(admin?.role) ? <DeviceProcesses deviceId={id} /> : <Panel><p className="p-4 text-[10px] text-[var(--color-muted)]">Process inspection and termination require lab-admin access.</p></Panel>
           ) : (
             <ComingSoon
               title={`${tab} data isn’t available yet`}

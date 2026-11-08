@@ -1,6 +1,8 @@
 import { api } from "../../lib/api";
 import type {
   Device,
+  DeviceProcessRequest,
+  ProcessOperation,
   DeviceStatus,
   DeviceTelemetry,
   RdpAccessRequest,
@@ -30,4 +32,11 @@ export const devicesApi = {
   requestRdp: (id: string) => api<RdpAccessRequest>(`/devices/${id}/rdp/requests`, { method: "POST", body: JSON.stringify({}) }),
   rdpRequest: (deviceId: string, requestId: string) =>
     api<RdpAccessRequest>(`/devices/${deviceId}/rdp/requests/${requestId}`),
+  requestProcessOperation: (deviceId: string, operation: ProcessOperation,
+                            process?: { target_pid: number; target_created_at_us: number }) =>
+    api<DeviceProcessRequest>(`/devices/${deviceId}/process-requests`, {
+      method: "POST", body: JSON.stringify({ operation, ...(process ?? {}) }),
+    }),
+  processRequest: (deviceId: string, requestId: string) =>
+    api<DeviceProcessRequest>(`/devices/${deviceId}/process-requests/${requestId}`),
 };

@@ -56,11 +56,9 @@ def test_load_existing_never_generates_identity(tmp_path):
     assert not (tmp_path / "identity.json").exists()
 
 
-def test_plain_http_requires_explicit_development_opt_in():
+def test_plain_http_is_supported_alongside_https():
     identity = DeviceIdentity.ephemeral()
-    with pytest.raises(ValueError, match="explicitly enabled"):
-        AgentClient("http://127.0.0.1:8000", identity)
-    client = AgentClient("http://127.0.0.1:8000", identity, allow_insecure_dev=True)
+    client = AgentClient("http://127.0.0.1:8000", identity)
     assert client.server_url == "http://127.0.0.1:8000"
     assert client.ssl_context.check_hostname
     assert client.ssl_context.verify_mode == 2
@@ -179,11 +177,7 @@ def test_service_configuration_validation_and_persistence(tmp_path):
     legacy_path.write_text('{"server_url":"https://labguard.example.test","state_dir":"' +
         str(tmp_path).replace("\\", "\\\\") + '"}', encoding="utf-8")
     assert AgentConfig.load(legacy_path).allow_insecure_dev is False
-    with pytest.raises(ValueError, match="HTTPS"):
-        AgentConfig("http://labguard.example.test", tmp_path)
-    with pytest.raises(ValueError, match="HTTPS"):
-        AgentConfig("http://labguard.example.test", tmp_path, allow_insecure_dev=False)
-    http_config = AgentConfig("http://labguard.example.test", tmp_path, allow_insecure_dev=True)
+    http_config = AgentConfig("http://labguard.example.test", tmp_path)
     http_path = tmp_path / "service-http.json"
     http_config.write(http_path)
     assert AgentConfig.load(http_path) == http_config
@@ -261,12 +255,12 @@ def test_service_cli_requires_and_forwards_explicit_development_flag(tmp_path, m
     assert calls[-1] == ("install", ("install",), {"insecure_dev": True})
 
 
-def test_service_install_requires_explicit_flag_for_http_config(tmp_path, monkeypatch):
+def test_service_install_accepts_http_config_without_special_flag(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from labguard_client import windows_service
     from labguard_client.service_config import AgentConfig
 
-    config = AgentConfig("http://127.0.0.1:8000", tmp_path, allow_insecure_dev=True)
+    config = AgentConfig("http://127.0.0.1:8000", tmp_path)
     monkeypatch.setattr(windows_service, "CONFIG_PATH", tmp_path / "service.json")
     config.write(windows_service.CONFIG_PATH)
     (tmp_path / "identity.json").write_text("{}", encoding="utf-8")
@@ -277,9 +271,7 @@ def test_service_install_requires_explicit_flag_for_http_config(tmp_path, monkey
         lambda: (SimpleNamespace(SERVICE_AUTO_START=2), util))
     staged_host = tmp_path / "venv" / "Scripts" / "pythonservice.exe"
     monkeypatch.setattr(windows_service, "_service_host_executable", lambda _service: staged_host)
-    with pytest.raises(RuntimeError, match="pass --insecure-dev"):
-        windows_service.service_command("install")
-    assert windows_service.service_command("install", insecure_dev=True).startswith("Installed")
+    assert windows_service.service_command("install").startswith("Installed")
     assert install_calls[0][1]["exeName"] == str(staged_host)
 
 
@@ -535,6 +527,7 @@ def test_telemetry_collection_fields_and_missing_information(monkeypatch):
     monkeypatch.setattr(telemetry.psutil, "net_if_stats", lambda: {})
     monkeypatch.setattr(telemetry, "_processor_name", lambda: None)
     monkeypatch.setattr(telemetry, "_windows_edition", lambda: None)
+    monkeypatch.setattr(telemetry, "active_windows_username", lambda: "LAB-PC-01\\student")
     monkeypatch.setattr(telemetry.platform, "system", lambda: "Windows")
     monkeypatch.setattr(telemetry.platform, "win32_ver", lambda: ("", "", "", ""))
     monkeypatch.setattr("labguard_client.telemetry.time.time", lambda: 2000.0)
@@ -543,6 +536,7 @@ def test_telemetry_collection_fields_and_missing_information(monkeypatch):
     assert result["storage_partitions"] == []
     assert result["network_interfaces"] == []
     assert result["operating_system"]["edition"] is None
+    assert result["operating_system"]["username"] == "LAB-PC-01\\student"
     assert result["uptime_seconds"] == 1000
     assert result["collected_at"] and result["boot_time"]
 

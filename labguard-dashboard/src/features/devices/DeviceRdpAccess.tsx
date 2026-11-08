@@ -3,14 +3,20 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button, Loading, Panel, PanelTitle, QueryError } from "../../components/ui";
 import { useToast } from "../../components/Toast";
 import { devicesApi } from "./api";
+import { shortWindowsUsername } from "./username";
 
 const HOST_LABEL = "[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?";
 const SAFE_HOST = new RegExp(`^(?=.{1,253}$)${HOST_LABEL}(?:\\.${HOST_LABEL})*\\.?$`);
 
-export function makeRdpConnectionFile(hostname: string): string {
+export function makeRdpConnectionFile(hostname: string, username = ""): string {
   if (!SAFE_HOST.test(hostname)) throw new Error("The target host name is invalid.");
+  const trimmedUsername = username.trim();
+  if (trimmedUsername.length > 256 || /[\u0000-\u001f\u007f]/.test(trimmedUsername)) {
+    throw new Error("The Windows username is invalid.");
+  }
   return [
     "full address:s:" + hostname,
+    ...(trimmedUsername ? ["username:s:" + trimmedUsername] : []),
     "prompt for credentials:i:1",
     "enablecredsspsupport:i:1",
     "authentication level:i:2",
@@ -22,8 +28,8 @@ export function makeRdpConnectionFile(hostname: string): string {
   ].join("\r\n");
 }
 
-function downloadRdp(hostname: string) {
-  const contents = makeRdpConnectionFile(hostname);
+function downloadRdp(hostname: string, username: string) {
+  const contents = makeRdpConnectionFile(hostname, username);
   const safeFilename = hostname.replace(/[^A-Za-z0-9.-]/g, "_");
   const url = URL.createObjectURL(new Blob([contents], { type: "application/x-rdp" }));
   const link = document.createElement("a");
@@ -72,6 +78,7 @@ export function DeviceRdpAccess({ deviceId }: { deviceId: string }) {
     return () => window.clearInterval(timer);
   }, [request.data?.status]);
   const leaseActive = request.data?.status === "READY" && Date.parse(request.data.access_expires_at) > now;
+  const rdpUsername = shortWindowsUsername(request.data?.username);
 
   return <Panel>
     <PanelTitle>Remote Desktop</PanelTitle>
@@ -84,14 +91,16 @@ export function DeviceRdpAccess({ deviceId }: { deviceId: string }) {
     {request.data?.status === "EXPIRED" && <p className="mb-3 text-[10px] text-[var(--color-muted)]">The request expired before RDP became ready. Request access again.</p>}
     {leaseActive && request.data && <div className="mb-3 rounded-lg bg-[var(--color-surface-subtle)] p-3 text-[10px] text-[var(--color-foreground)]">
       <p>Ready for <strong>{request.data.hostname}</strong> until {new Date(request.data.access_expires_at).toLocaleTimeString()}.</p>
-      <p className="mt-1 text-[var(--color-muted)]">Download the connection file, then open it from this PC’s Downloads to launch Windows Remote Desktop. Your browser cannot launch desktop apps directly.</p>
+      <p className="mt-1">{rdpUsername ? <>Connect as <strong>{rdpUsername}</strong>.</> : "No RDP account name was reported by this endpoint."}</p>
+      <p className="mt-1 text-[var(--color-muted)]">The endpoint reports its active Windows account automatically. Windows will still prompt for its password.</p>
+          <p className="mt-1 text-[var(--color-muted)]">Open it from this PC’s Downloads to launch Windows Remote Desktop. Your browser cannot launch desktop apps directly.</p>
     </div>}
     <div className="flex flex-wrap gap-2">
       <Button disabled={create.isPending || request.data?.status === "PENDING"} onClick={() => create.mutate()}>
         {create.isPending ? "Requesting…" : "Request RDP access"}
       </Button>
       {leaseActive && request.data && <Button onClick={() => {
-        try { downloadRdp(request.data!.hostname); }
+        try { downloadRdp(request.data!.hostname, rdpUsername ?? ""); }
         catch (error) { toast(error instanceof Error ? error.message : "Could not prepare the RDP file.", "error"); }
       }}>Download Windows RDP file</Button>}
     </div>

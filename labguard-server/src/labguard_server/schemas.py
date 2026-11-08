@@ -55,6 +55,7 @@ class RdpAccessRequestOut(BaseModel):
     id: UUID
     device_id: UUID
     hostname: str
+    username: str | None
     status: Literal["PENDING", "READY", "FAILED", "EXPIRED"]
     error_code: str | None
     created_at: datetime
@@ -67,7 +68,77 @@ class RdpAccessResultIn(BaseModel):
     request_id: UUID
     status: Literal["READY", "FAILED"]
     error_code: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[a-z0-9_:-]+$")
+    username: StrictStr | None = Field(default=None, max_length=256)
 
+    @field_validator("username")
+    @classmethod
+    def valid_username(cls, value):
+        if value is not None and (not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            raise ValueError("RDP username must contain printable characters")
+        return value
+
+
+class ProcessEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    pid: StrictInt = Field(ge=0, le=2_147_483_647)
+    name: StrictStr = Field(min_length=1, max_length=256)
+    username: StrictStr | None = Field(default=None, max_length=256)
+    executable_path: StrictStr | None = Field(default=None, max_length=1024)
+    cpu_percent: FiniteFloat | None = Field(default=None, ge=0, le=10000)
+    memory_bytes: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
+    created_at_us: StrictInt | None = Field(default=None, ge=1, le=2**63 - 1)
+
+
+class ProcessRequestCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["LIST", "TERMINATE", "KILL"]
+    target_pid: StrictInt | None = Field(default=None, ge=1, le=2_147_483_647)
+    target_created_at_us: StrictInt | None = Field(default=None, ge=1, le=2**63 - 1)
+
+    @model_validator(mode="after")
+    def operation_target_matches(self):
+        if self.operation == "LIST" and (self.target_pid is not None or self.target_created_at_us is not None):
+            raise ValueError("List requests cannot contain a target process")
+        if self.operation != "LIST" and (self.target_pid is None or self.target_created_at_us is None):
+            raise ValueError("Termination requests require PID and creation time")
+        return self
+
+
+class ProcessRequestOut(BaseModel):
+    id: UUID
+    device_id: UUID
+    operation: Literal["LIST", "TERMINATE", "KILL"]
+    status: Literal["PENDING", "COMPLETE", "FAILED", "EXPIRED"]
+    target_pid: int | None
+    target_created_at_us: int | None
+    result_code: str | None
+    processes: list[ProcessEntry] | None
+    created_at: datetime
+    expires_at: datetime
+    completed_at: datetime | None
+
+
+class ProcessResultIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+    batch_index: StrictInt = Field(default=0, ge=0, le=124)
+    batch_count: StrictInt = Field(default=1, ge=1, le=125)
+    processes: list[ProcessEntry] = Field(default_factory=list, max_length=8)
+    result_code: Literal["request_expired", "process_list_failed", "process_list_truncated", "terminated", "killed", "process_not_found",
+                         "pid_reused", "access_denied", "invalid_process_identity",
+                         "protected_process", "terminate_timeout", "kill_timeout",
+                         "operation_failed"] | None = None
+
+    @model_validator(mode="after")
+    def batch_is_valid(self):
+        if self.batch_index >= self.batch_count:
+            raise ValueError("Process result batch index exceeds batch count")
+        if self.result_code not in (None, "request_expired", "process_list_failed", "process_list_truncated") and (
+                self.batch_count != 1 or self.batch_index != 0 or self.processes):
+            raise ValueError("Process action results cannot contain process batches")
+        if self.result_code == "process_list_failed" and (self.batch_count != 1 or self.processes):
+            raise ValueError("Failed process listings cannot contain process entries")
+        return self
 
 class RoomCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
@@ -176,6 +247,22 @@ class TelemetryOperatingSystem(BaseModel):
     build_number: str | None = Field(default=None, max_length=64)
     architecture: str = Field(min_length=1, max_length=64)
     hostname: str = Field(min_length=1, max_length=255)
+    username: str | None = Field(default=None, max_length=256)
+    agent_account: str | None = Field(default=None, max_length=256)
+
+    @field_validator("username")
+    @classmethod
+    def username_is_printable(cls, value):
+        if value is not None and (not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            raise ValueError("Username must contain printable characters")
+        return value
+
+    @field_validator("agent_account")
+    @classmethod
+    def agent_account_is_printable(cls, value):
+        if value is not None and (not value.strip() or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            raise ValueError("Agent account must contain printable characters")
+        return value
 
 
 class TelemetryNetworkInterface(BaseModel):

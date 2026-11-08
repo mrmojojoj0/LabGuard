@@ -9,9 +9,11 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 _TERMINAL_SERVICES = r"SYSTEM\CurrentControlSet\Control\Terminal Server"
+_LSA = r"SYSTEM\CurrentControlSet\Control\Lsa"
 _POLICY_TERMINAL_SERVICES = r"SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
 _RDP_STATE_VALUE = "LabGuardTemporaryRdpState"
 _F_DENY = "fDenyTSConnections"
+_LIMIT_BLANK_PASSWORD_USE = "LimitBlankPasswordUse"
 _RULE_PREFIX = "LabGuard-RDP-"
 _LEASE_MINUTES = 60
 _CODE_RE = re.compile(r"^[a-z0-9_:-]{1,64}$")
@@ -114,6 +116,12 @@ def cleanup_expired_rdp_access(*, registry_module=None, run_process=subprocess.r
     else:
         _write_value(registry, registry.HKEY_LOCAL_MACHINE, _TERMINAL_SERVICES,
                      _F_DENY, original["value"], original["type"])
+    original_blank_password = marker.get("original_limit_blank_password_use")
+    if original_blank_password is None:
+        _delete_value(registry, registry.HKEY_LOCAL_MACHINE, _LSA, _LIMIT_BLANK_PASSWORD_USE)
+    else:
+        _write_value(registry, registry.HKEY_LOCAL_MACHINE, _LSA, _LIMIT_BLANK_PASSWORD_USE,
+                     original_blank_password["value"], original_blank_password["type"])
     try:
         _remove_firewall_rules(marker, system_root, run_process)
     except RdpAccessError:
@@ -169,12 +177,21 @@ def prepare_rdp_access(request_id: str, access_expires_at: str, *, registry_modu
         if marker is None:
             current, current_type = _read_value(registry, registry.HKEY_LOCAL_MACHINE,
                                                 _TERMINAL_SERVICES, _F_DENY)
+            blank_password, blank_password_type = _read_value(
+                registry, registry.HKEY_LOCAL_MACHINE, _LSA, _LIMIT_BLANK_PASSWORD_USE)
             rules = [f"{_RULE_PREFIX}{request_uuid}-Domain", f"{_RULE_PREFIX}{request_uuid}-Private"]
             marker = {"version": 1, "request_id": request_uuid,
                       "access_expires_at": expiry.isoformat().replace("+00:00", "Z"),
                       "original_f_deny": None if current is None else {"value": current, "type": current_type},
+                      "original_limit_blank_password_use": None if blank_password is None else {
+                          "value": blank_password, "type": blank_password_type},
                       "firewall_rules": rules}
         else:
+            if "original_limit_blank_password_use" not in marker:
+                blank_password, blank_password_type = _read_value(
+                    registry, registry.HKEY_LOCAL_MACHINE, _LSA, _LIMIT_BLANK_PASSWORD_USE)
+                marker["original_limit_blank_password_use"] = (
+                    None if blank_password is None else {"value": blank_password, "type": blank_password_type})
             marker["request_id"] = request_uuid
             old_expiry = datetime.fromisoformat(marker["access_expires_at"].replace("Z", "+00:00"))
             marker["access_expires_at"] = max(old_expiry, expiry).astimezone(UTC).isoformat().replace("+00:00", "Z")
@@ -184,6 +201,10 @@ def prepare_rdp_access(request_id: str, access_expires_at: str, *, registry_modu
         _write_value(registry, registry.HKEY_LOCAL_MACHINE, _TERMINAL_SERVICES,
                      _RDP_STATE_VALUE, json.dumps(marker, separators=(",", ":")), registry.REG_SZ)
         marker_saved = True
+        # Permit local accounts with blank passwords only during this audited,
+        # time-bounded RDP lease. The original registry state is in the recovery marker.
+        _write_value(registry, registry.HKEY_LOCAL_MACHINE, _LSA,
+                     _LIMIT_BLANK_PASSWORD_USE, 0, registry.REG_DWORD)
         if not existing_lease and (marker["original_f_deny"] is None or marker["original_f_deny"]["value"] != 0):
             _write_value(registry, registry.HKEY_LOCAL_MACHINE, _TERMINAL_SERVICES,
                          _F_DENY, 0, registry.REG_DWORD)

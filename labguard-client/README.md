@@ -1,6 +1,6 @@
 # LabGuard Client
 
-Windows endpoint agent for authenticated device enrollment, heartbeat, telemetry, software inventory, individual WinGet/Chocolatey jobs, and LAB_ADMIN-requested temporary RDP access. It does not provide arbitrary remote execution, process control, packet capture, or USB monitoring.
+Windows endpoint agent for authenticated device enrollment, heartbeat, telemetry, software inventory, individual WinGet/Chocolatey jobs, LAB_ADMIN-requested temporary RDP access, and bounded process inspection/termination. It does not provide arbitrary remote execution, packet capture, or USB monitoring.
 
 ## Install
 
@@ -107,4 +107,8 @@ Machine-scope jobs require an elevated administrator or LocalSystem. USER-scope 
 
 ## Temporary RDP access
 
-An authenticated LAB_ADMIN request arrives over the existing device-ticket WSS connection. The agent requires an elevated or LocalSystem token, rejects Windows Home and policy-disabled RDP, preserves the current `fDenyTSConnections` value, and creates fixed TCP/3389 firewall rules for the local subnet on Domain/Private profiles only. Network Level Authentication is unchanged. A machine registry marker stores the prior setting and lease expiry so cleanup continues after service restart. After 60 minutes the agent restores the previous RDP setting and removes only its own firewall rules. Repeated requests extend the active lease. Windows account credentials are never collected. Actual listener, firewall and timeout behavior requires controlled Windows endpoint validation.
+An authenticated LAB_ADMIN request arrives over the existing device-ticket WSS connection. The client automatically reports the active console account as `COMPUTER\user` in telemetry and the RDP result; no username configuration is needed. The device information panel displays the hostname and detected username, and the downloaded `.rdp` file uses that username. Windows still prompts for its password. If no active console account can be detected, the username is shown as unavailable and the RDP file omits it. The agent requires an elevated or LocalSystem token, rejects Windows Home and policy-disabled RDP, preserves the current `fDenyTSConnections` and `LimitBlankPasswordUse` values, and creates fixed TCP/3389 firewall rules for the local subnet on Domain/Private profiles only. Network Level Authentication is unchanged. A machine registry marker stores the previous values and lease expiry so cleanup continues after service restart. After 60 minutes the agent restores both values and removes only its own firewall rules. Repeated requests extend the active lease. Windows passwords are never collected. Actual listener, firewall and timeout behavior requires controlled Windows endpoint validation.
+
+## Process operations
+
+The agent handles only typed `LIST`, `TERMINATE`, and `KILL` requests from the authenticated server WebSocket. Process lists are capped at 1,000 entries and include bounded PID, name, username, CPU, memory, executable path, and creation time. Termination requires both PID and creation time; the agent refuses PID reuse, itself, core Windows PIDs, and core system process names. No shell commands or arbitrary executable paths are accepted. Windows `psutil.terminate()` is implemented with `TerminateProcess`, so it may close an application immediately without a save prompt; the separate Force Kill action uses the same Windows mechanism. Test on disposable processes before using termination on managed lab PCs.

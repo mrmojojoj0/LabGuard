@@ -25,11 +25,35 @@ export interface RdpAccessRequest {
   id: string;
   device_id: string;
   hostname: string;
+  username?: string | null;
   status: "PENDING" | "READY" | "FAILED" | "EXPIRED";
   error_code: string | null;
   created_at: string;
   expires_at: string;
   access_expires_at: string;
+}
+export interface DeviceProcessEntry {
+  pid: number;
+  name: string;
+  username: string | null;
+  executable_path: string | null;
+  cpu_percent: number | null;
+  memory_bytes: number | null;
+  created_at_us: number | null;
+}
+export type ProcessOperation = "LIST" | "TERMINATE" | "KILL";
+export interface DeviceProcessRequest {
+  id: string;
+  device_id: string;
+  operation: ProcessOperation;
+  status: "PENDING" | "COMPLETE" | "FAILED" | "EXPIRED";
+  target_pid: number | null;
+  target_created_at_us: number | null;
+  result_code: string | null;
+  processes: DeviceProcessEntry[] | null;
+  created_at: string;
+  expires_at: string;
+  completed_at: string | null;
 }
 export interface TelemetryPartition {
   device: string;
@@ -70,6 +94,8 @@ export interface TelemetrySnapshot {
     build_number: string | null;
     architecture: string;
     hostname: string;
+    username: string | null;
+    agent_account: string | null;
   };
   boot_time: string;
   uptime_seconds: number;
