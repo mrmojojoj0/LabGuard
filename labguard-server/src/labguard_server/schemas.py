@@ -275,6 +275,26 @@ class TelemetryNetworkInterface(BaseModel):
     speed_mbps: FiniteFloat | None = Field(default=None, ge=0, le=10_000_000)
 
 
+class TelemetryNetworkConnection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    observed_at: datetime
+    direction: Literal["INCOMING", "OUTGOING", "UNKNOWN"]
+    protocol: Literal["TCP", "UDP"]
+    local_ip: IPv4Address | IPv6Address
+    local_port: StrictInt = Field(ge=0, le=65535)
+    remote_ip: IPv4Address | IPv6Address | None = None
+    remote_port: StrictInt | None = Field(default=None, ge=0, le=65535)
+    interface: StrictStr = Field(min_length=1, max_length=128)
+    state: StrictStr = Field(min_length=1, max_length=32)
+
+    @field_validator("observed_at")
+    @classmethod
+    def timestamp_has_timezone(cls, value):
+        if value.tzinfo is None:
+            raise ValueError("Network connection timestamp must include a timezone")
+        return value
+
+
 class TelemetrySnapshotIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     collected_at: datetime
@@ -285,6 +305,7 @@ class TelemetrySnapshotIn(BaseModel):
     boot_time: datetime
     uptime_seconds: FiniteFloat = Field(ge=0, le=2**53)
     network_interfaces: list[TelemetryNetworkInterface] = Field(max_length=64)
+    network_connections: list[TelemetryNetworkConnection] | None = Field(default=None, max_length=1000)
 
     @model_validator(mode="after")
     def timestamps_have_timezone(self):

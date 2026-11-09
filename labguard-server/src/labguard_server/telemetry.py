@@ -46,6 +46,8 @@ def record_telemetry(db: Session, device_id: UUID, sequence: int, payload: Telem
         "os_version": os_info.version, "build_number": os_info.build_number,
         "architecture": os_info.architecture, "hostname": os_info.hostname,
         "username": os_info.username, "agent_account": os_info.agent_account,
+        "network_connections": ([item.model_dump(mode="json") for item in payload.network_connections]
+                                if payload.network_connections is not None else None),
         "boot_time": _utc(payload.boot_time), "uptime_seconds": payload.uptime_seconds,
         "network_interfaces": interfaces,
     }
@@ -103,6 +105,7 @@ def latest_telemetry(db: Session, device_id: UUID, stale_after_seconds: int):
                              "build_number": latest.build_number, "architecture": latest.architecture,
                              "hostname": latest.hostname, "username": latest.username,
                              "agent_account": latest.agent_account},
+        "network_connections": latest.network_connections,
         "boot_time": latest.boot_time.isoformat(), "uptime_seconds": latest.uptime_seconds,
         "network_interfaces": latest.network_interfaces,
     }

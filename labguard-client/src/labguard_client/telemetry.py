@@ -143,8 +143,10 @@ def collect_system_telemetry() -> dict:
     logical = psutil.cpu_count(logical=True) or 1
     physical = psutil.cpu_count(logical=False)
     now = time.time()
+    collected_at = datetime.now(UTC).isoformat()
+    network_connections = _collect_network_connections(interfaces, collected_at)
     return {
-        "collected_at": datetime.now(UTC).isoformat(),
+        "collected_at": collected_at,
         "cpu": {"processor_name": _processor_name(), "logical_processors": int(logical),
                 "physical_cores": int(physical) if physical else None, "utilization_percent": cpu_percent},
         "memory": {"total_bytes": int(memory.total), "used_bytes": int(memory.used),
@@ -158,4 +160,55 @@ def collect_system_telemetry() -> dict:
         "boot_time": datetime.fromtimestamp(boot_time, UTC).isoformat(),
         "uptime_seconds": max(0.0, now - boot_time),
         "network_interfaces": interfaces,
+        "network_connections": network_connections,
     }
+
+
+def _collect_network_connections(interfaces: list[dict], observed_at: str) -> list[dict] | None:
+    """Return a bounded snapshot of active IP sockets without process or payload data."""
+    interface_by_ip = {
+        address: interface["name"]
+        for interface in interfaces
+        for address in interface["ipv4_addresses"] + interface["ipv6_addresses"]
+    }
+    try:
+        connections = psutil.net_connections(kind="inet")
+    except (OSError, psutil.Error):
+        return None
+
+    result = []
+    for connection in connections[:1000]:
+        local = connection.laddr
+        remote = connection.raddr
+        if not local:
+            continue
+        protocol = "TCP" if connection.type == socket.SOCK_STREAM else "UDP" if connection.type == socket.SOCK_DGRAM else None
+        if protocol is None:
+            continue
+        local_ip = str(local.ip).split("%", 1)[0]
+        local_port = int(local.port)
+        remote_ip = str(remote.ip).split("%", 1)[0] if remote else None
+        remote_port = int(remote.port) if remote else None
+        state = str(connection.status or "UNKNOWN")[:32]
+        if state.casefold() == "listen":
+            direction = "INCOMING"
+        elif remote_port is None:
+            direction = "UNKNOWN"
+        elif local_port >= 49152 > remote_port:
+            direction = "OUTGOING"
+        elif remote_port >= 49152 > local_port:
+            direction = "INCOMING"
+        else:
+            direction = "UNKNOWN"
+        result.append({
+            "observed_at": observed_at,
+            "direction": direction,
+            "protocol": protocol,
+            "local_ip": local_ip,
+            "local_port": local_port,
+            "remote_ip": remote_ip,
+            "remote_port": remote_port,
+            "interface": interface_by_ip.get(local_ip, "All interfaces" if local_ip in {"0.0.0.0", "::"} else "Unknown"),
+            "state": state,
+        })
+    return result

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, Radio, ShieldCheck, Trash2 } from "lucide-react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { devicesApi } from "./api";
-import { SystemTelemetry } from "./SystemTelemetry";
+import { NetworkInterfaces, OperatingSystemUptime, SystemTelemetry } from "./SystemTelemetry";
 import {
   Button,
   ComingSoon,
@@ -155,7 +155,7 @@ export function DeviceDetailPage() {
                 key={item}
               >
                 {item}
-                {!["Overview", "Software", "Remote Access"].includes(item) && (
+                {!["Overview", "Hardware", "Software", "Network", "Remote Access"].includes(item) && (
                   <span className="ml-1 rounded bg-[var(--color-surface-subtle)] px-1 py-0.5 text-[7px] text-[var(--color-muted)]">
                     SOON
                   </span>
@@ -221,9 +221,14 @@ export function DeviceDetailPage() {
                   server heartbeat receipt.
                 </div>
               </Panel>
+              <OperatingSystemUptime data={telemetry.data?.snapshot} />
             </div>
           ) : tab === "Software" ? (
             <DeviceSoftware id={id} />
+          ) : tab === "Hardware" ? (
+            <SystemTelemetry id={id} />
+          ) : tab === "Network" ? (
+            <NetworkInterfaces data={telemetry.data?.snapshot} />
           ) : tab === "Remote Access" ? (
             canManageLabs(admin?.role) ? <DeviceRdpAccess deviceId={id} /> : <Panel><p className="p-4 text-[10px] text-[var(--color-muted)]">Remote Desktop access requires lab-admin access.</p></Panel>
           ) : tab === "Processes" ? (
@@ -244,7 +249,6 @@ export function DeviceDetailPage() {
           </Panel>
         )
       )}
-      {device && tab === "Overview" && <SystemTelemetry id={id} />}
       {confirmDelete && device && (
         <div
           className="fixed inset-0 z-[100] grid place-items-center bg-slate-950/40 p-4"

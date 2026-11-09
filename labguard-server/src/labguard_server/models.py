@@ -110,6 +110,7 @@ class DeviceTelemetryLatest(Base):
     hostname: Mapped[str] = mapped_column(String(255))
     username: Mapped[str | None] = mapped_column(String(256))
     agent_account: Mapped[str | None] = mapped_column(String(256))
+    network_connections: Mapped[list | None] = mapped_column(JSON)
     boot_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     uptime_seconds: Mapped[float] = mapped_column(Float)
     network_interfaces: Mapped[list] = mapped_column(JSON)

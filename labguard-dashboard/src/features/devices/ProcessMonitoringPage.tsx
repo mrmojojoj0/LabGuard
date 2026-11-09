@@ -41,7 +41,7 @@ export function ProcessMonitoringPage() {
             ))}
           </div>
         ) : (
-          <Empty title="No devices registered" description="Enroll a device to inspect its processes." />
+          <Empty title="No devices registered" detail="Enroll a device to inspect its processes." />
         )}
       </Panel>
     </>

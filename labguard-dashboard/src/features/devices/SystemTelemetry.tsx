@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Cpu, MemoryStick, HardDrive, Activity } from "lucide-react";
 import { devicesApi } from "./api";
 import { Panel, PanelTitle, QueryError, Skeleton } from "../../components/ui";
-import type { TelemetrySample } from "../../lib/types";
+import type { TelemetrySample, TelemetrySnapshot } from "../../lib/types";
 
 function formatBytes(value: number) {
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -23,6 +23,85 @@ function formatUptime(value: number) {
   return `${days}d ${hours}h ${minutes}m`;
 }
 
+export function OperatingSystemUptime({ data }: { data: TelemetrySnapshot | null | undefined }) {
+  if (!data) {
+    return (
+      <Panel>
+        <PanelTitle>Operating system &amp; uptime</PanelTitle>
+        <p className="py-3 text-[9px] text-[var(--color-muted)]">Waiting for the first telemetry report.</p>
+      </Panel>
+    );
+  }
+  const os = data.operating_system;
+  const rows: Array<[string, string]> = [
+    ["Windows edition", os.edition || "Unavailable"],
+    ["Version", os.version || "Unavailable"],
+    ["Build", os.build_number || "Unavailable"],
+    ["Architecture", os.architecture || "Unavailable"],
+    ["Hostname", os.hostname || "Unavailable"],
+    ["Uptime", formatUptime(data.uptime_seconds)],
+    ["Boot time", new Date(data.boot_time).toLocaleString()],
+  ];
+  return (
+    <Panel>
+      <PanelTitle>Operating system &amp; uptime</PanelTitle>
+      <div className="grid">
+        {rows.map(([label, value], index) => (
+          <div
+            className={`flex justify-between gap-3 py-2.5 text-[10px] ${index < rows.length - 1 ? "border-b border-[var(--color-border)]" : ""}`}
+            key={label}
+          >
+            <span className="text-[var(--color-muted)]">{label}</span>
+            <strong className="text-right text-[var(--color-foreground)]">{value}</strong>
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
+export function NetworkInterfaces({ data }: { data: TelemetrySnapshot | null | undefined }) {
+  const connections = data?.network_connections;
+  return (
+    <Panel>
+      <PanelTitle>Network activity</PanelTitle>
+      {!data ? (
+        <p className="py-3 text-[9px] text-[var(--color-muted)]">Waiting for the first telemetry report.</p>
+      ) : connections == null ? (
+        <p className="py-3 text-[9px] text-[var(--color-muted)]">No network connection snapshot is available from this endpoint.</p>
+      ) : connections.length ? (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[900px] text-left text-[10px]">
+            <thead>
+              <tr className="border-b border-[var(--color-border)] text-[var(--color-muted)]">
+                <th className="p-2">Time</th><th className="p-2">Direction</th><th className="p-2">Domain / IP</th>
+                <th className="p-2">Type</th><th className="p-2">Interface</th><th className="p-2">Local endpoint</th>
+                <th className="p-2">Remote endpoint</th><th className="p-2">State</th>
+              </tr>
+            </thead>
+            <tbody>
+              {connections.map((connection, index) => (
+                <tr className="border-b border-[var(--color-border)] last:border-0" key={`${connection.protocol}:${connection.local_ip}:${connection.local_port}:${connection.remote_ip}:${connection.remote_port}:${index}`}>
+                  <td className="whitespace-nowrap p-2">{new Date(connection.observed_at).toLocaleString()}</td>
+                  <td className="p-2">{connection.direction.toLowerCase()}</td>
+                  <td className="p-2 font-mono">{connection.remote_ip ?? connection.local_ip}</td>
+                  <td className="p-2">{connection.protocol}</td>
+                  <td className="p-2">{connection.interface}</td>
+                  <td className="p-2 font-mono">{connection.local_ip}:{connection.local_port}</td>
+                  <td className="p-2 font-mono">{connection.remote_ip ? `${connection.remote_ip}:${connection.remote_port ?? ""}` : "—"}</td>
+                  <td className="p-2">{connection.state}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="mt-3 text-[8px] text-[var(--color-muted)]">Active TCP/UDP connection snapshots update with telemetry, about every 30 seconds. Packet headers and payloads are not collected.</p>
+        </div>
+      ) : (
+        <p className="py-3 text-[9px] text-[var(--color-muted)]">No active network connections were reported.</p>
+      )}
+    </Panel>
+  );
+}
 function MetricChart({
   title,
   values,
@@ -147,7 +226,6 @@ export function SystemTelemetry({ id }: { id: string }) {
         </div>
       </Panel>
     );
-  const os = data.operating_system;
   return (
     <div className="mt-3.5 grid gap-3.5">
       <Panel>
@@ -241,33 +319,7 @@ export function SystemTelemetry({ id }: { id: string }) {
           />
         </div>
       </Panel>
-      <div className="grid gap-4 min-[981px]:grid-cols-2">
-        <Panel>
-          <PanelTitle>Operating system & uptime</PanelTitle>
-          <div className="grid">
-            {(
-              [
-                ["Windows edition", os.edition || "Unavailable"],
-                ["Version", os.version || "Unavailable"],
-                ["Build", os.build_number || "Unavailable"],
-                ["Architecture", os.architecture || "Unavailable"],
-                ["Hostname", os.hostname || "Unavailable"],
-                ["Uptime", formatUptime(data.uptime_seconds)],
-                ["Boot time", new Date(data.boot_time).toLocaleString()],
-              ] as Array<[string, string]>
-            ).map(([label, value], index, values) => (
-              <div
-                className={`flex justify-between gap-3 py-2.5 text-[10px] ${index < values.length - 1 ? "border-b border-[var(--color-border)]" : ""}`}
-                key={label}
-              >
-                <span className="text-[var(--color-muted)]">{label}</span>
-                <strong className="text-right text-[var(--color-foreground)]">
-                  {value}
-                </strong>
-              </div>
-            ))}
-          </div>
-        </Panel>
+      <div className="grid gap-4">
         <Panel>
           <PanelTitle>Storage volumes</PanelTitle>
           {data.storage_partitions.length ? (
@@ -311,46 +363,6 @@ export function SystemTelemetry({ id }: { id: string }) {
           )}
         </Panel>
       </div>
-      <Panel>
-        <PanelTitle>Network interfaces</PanelTitle>
-        {data.network_interfaces.length ? (
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {data.network_interfaces.map((item, index) => (
-              <div
-                className="flex flex-col gap-1.5 rounded-lg border border-[var(--color-border)] p-2.5"
-                key={`${item.name}-${index}`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <strong className="text-[9px] text-[var(--color-foreground)]">
-                    {item.name}
-                  </strong>
-                  <span
-                    className={`rounded-full px-1.5 py-0.5 text-[7px] font-bold ${item.status.toLowerCase() === "up" ? "bg-[var(--color-success-soft)] text-[var(--color-success)]" : item.status.toLowerCase() === "down" ? "bg-[var(--color-danger-soft)] text-[var(--color-danger)]" : "bg-[var(--color-surface-subtle)] text-[var(--color-muted)]"}`}
-                  >
-                    {item.status}
-                  </span>
-                </div>
-                <small className="text-[8px] text-[var(--color-muted)]">
-                  MAC {item.mac_address || "Unavailable"}
-                  {item.speed_mbps
-                    ? ` · ${item.speed_mbps.toLocaleString()} Mbps`
-                    : ""}
-                </small>
-                <small className="text-[8px] text-[var(--color-muted)]">
-                  IPv4 {item.ipv4_addresses.join(", ") || "Unavailable"}
-                </small>
-                <small className="text-[8px] text-[var(--color-muted)]">
-                  IPv6 {item.ipv6_addresses.join(", ") || "Unavailable"}
-                </small>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-[9px] text-[var(--color-muted)]">
-            Network interface details unavailable.
-          </div>
-        )}
-      </Panel>
     </div>
   );
 }

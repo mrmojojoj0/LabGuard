@@ -72,6 +72,17 @@ export interface TelemetryInterface {
   ipv6_addresses: string[];
   speed_mbps: number | null;
 }
+export interface TelemetryNetworkConnection {
+  observed_at: string;
+  direction: "INCOMING" | "OUTGOING" | "UNKNOWN";
+  protocol: "TCP" | "UDP";
+  local_ip: string;
+  local_port: number;
+  remote_ip: string | null;
+  remote_port: number | null;
+  interface: string;
+  state: string;
+}
 export interface TelemetrySnapshot {
   collected_at: string;
   received_at: string;
@@ -100,6 +111,7 @@ export interface TelemetrySnapshot {
   boot_time: string;
   uptime_seconds: number;
   network_interfaces: TelemetryInterface[];
+  network_connections: TelemetryNetworkConnection[] | null;
 }
 export interface DeviceTelemetry {
   device_id: string;
