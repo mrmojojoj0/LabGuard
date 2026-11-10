@@ -21,9 +21,11 @@ def _aware(value: datetime) -> datetime:
 def exam_out(db: Session, exam: Exam) -> dict:
     room = db.get(Room, exam.room_id)
     count = db.scalar(select(func.count(ExamViolation.id)).where(ExamViolation.exam_id == exam.id)) or 0
+    policy = dict(exam.policy_json or {})
+    policy["screenshot_on_violation"] = True
     return {"id": exam.id, "room_id": exam.room_id, "room_name": room.name if room else "Unknown room",
             "title": exam.title, "starts_at": exam.starts_at, "ends_at": exam.ends_at,
-            "status": exam.status, "device_ids": exam.device_ids, "policy": exam.policy_json,
+            "status": exam.status, "device_ids": exam.device_ids, "policy": policy,
             "created_at": exam.created_at, "updated_at": exam.updated_at, "violations": count}
 
 
@@ -93,8 +95,6 @@ def transition_schedules(db: Session) -> list[tuple[UUID, str]]:
 def _schedule_violation_captures(db: Session, exam: Exam, device_id: UUID,
                                 violation: ExamViolation, occurred_at: datetime) -> list[dict]:
     """Queue captures at violation time and 10, 20, and 30 seconds later."""
-    if not (exam.policy_json or {}).get("screenshot_on_violation"):
-        return []
     device = db.get(Device, device_id)
     if device is None or not device.enabled:
         return []
@@ -126,16 +126,21 @@ async def dispatch_exam_capture(application, job: dict) -> bool:
     from labguard_server.websocket import send_screenshot_request
     device_id = job["device_id"]
     capture_id = job["capture_id"]
-    sent = await send_screenshot_request(application, device_id, {
-        "capture_id": str(capture_id), "expires_at": job["expires_at"]})
     with application.state.session_factory() as db:
-        capture = db.get(ScreenshotCapture, capture_id)
-        if capture is None or capture.status != "PENDING":
+        capture = db.scalar(select(ScreenshotCapture).where(
+            ScreenshotCapture.id == capture_id).with_for_update())
+        if capture is None or capture.status != "PENDING" or capture.dispatched_at is not None:
             return False
         capture.dispatched_at = now_utc()
-        if not sent:
-            capture.status, capture.error_code = "FAILED", "agent_unavailable"
         db.commit()
+    sent = await send_screenshot_request(application, device_id, {
+        "capture_id": str(capture_id), "expires_at": job["expires_at"]})
+    if not sent:
+        with application.state.session_factory() as db:
+            capture = db.get(ScreenshotCapture, capture_id)
+            if capture and capture.status == "PENDING":
+                capture.status, capture.error_code = "FAILED", "agent_unavailable"
+                db.commit()
     return sent
 
 
@@ -153,11 +158,11 @@ async def exam_evidence_monitor(application):
                     ScreenshotCapture.dispatched_at.is_(None),
                 ).order_by(ScreenshotCapture.scheduled_at).limit(100)).all()
                 jobs = [{"device_id": row.device_id, "capture_id": row.id,
-                    "scheduled_at": row.scheduled_at,
-                    "expires_at": (row.scheduled_at + timedelta(seconds=90)).isoformat()}
+                    "scheduled_at": _aware(row.scheduled_at),
+                    "expires_at": (_aware(row.scheduled_at) + timedelta(seconds=90)).isoformat()}
                     for row in rows]
             for job in jobs:
-                if now_utc() > job["scheduled_at"] + timedelta(seconds=90):
+                if now_utc() > _aware(job["scheduled_at"]) + timedelta(seconds=90):
                     with application.state.session_factory() as db:
                         row = db.get(ScreenshotCapture, job["capture_id"])
                         if row and row.status == "PENDING" and row.dispatched_at is None:

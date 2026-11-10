@@ -47,6 +47,7 @@ def test_exam_creation_schedule_and_report_reuse_lab_devices(client):
     assert exam["device_ids"] == [device_id]
     assert exam["policy"]["allowed_networks"] == ["192.168.1.0/24"]
     assert exam["policy"]["restricted_browsers"] == ["msedge.exe", "chrome.exe", "firefox.exe"]
+    assert exam["policy"]["screenshot_on_violation"] is True
     assert client.get("/api/v1/exams").json()[0]["id"] == exam["id"]
     report = client.get(f"/api/v1/exams/{exam['id']}/report").json()
     assert report["devices"][0]["device_id"] == device_id
@@ -83,7 +84,9 @@ def test_active_browser_restriction_creates_one_deduplicated_violation(client):
     with client.app.state.session_factory() as db:
         exam_ids, captures = record_browser_scan(db, UUID(device_id), scan)
     assert exam_ids == [UUID(exam_id)]
-    assert len(captures) == 1
+    assert len(captures) == 4
+    assert [int((item["scheduled_at"] - captures[0]["scheduled_at"]).total_seconds())
+            for item in captures] == [0, 10, 20, 30]
     with client.app.state.session_factory() as db:
         exam_ids, _ = record_browser_scan(db, UUID(device_id), scan)
         alerts = db.query(ExamViolation).filter(ExamViolation.exam_id == UUID(exam_id)).all()
@@ -91,3 +94,4 @@ def test_active_browser_restriction_creates_one_deduplicated_violation(client):
     assert len(alerts) == 1
     assert alerts[0].kind == "RESTRICTED_BROWSER_RUNNING"
     assert alerts[0].details["count"] == 2
+    assert len(alerts[0].details["screenshot_capture_ids"]) == 4

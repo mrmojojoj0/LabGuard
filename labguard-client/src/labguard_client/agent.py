@@ -228,7 +228,7 @@ class AgentClient:
         job_offers: asyncio.Queue[dict] = asyncio.Queue(maxsize=8)
         rdp_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=4)
         process_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=4)
-        screenshot_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
+        screenshot_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=8)
         exam_browser_scans: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
 
         async def heartbeat_loop():
@@ -322,9 +322,29 @@ class AgentClient:
                     logger.exception("Process request failed (%s)", type(exc).__name__)
 
         async def screenshot_request_loop():
-            while not stop.is_set():
-                payload = await screenshot_requests.get()
-                await self._run_screenshot_request(payload, ws, pending, send_lock)
+            capture_limit = asyncio.Semaphore(4)
+            active_captures: set[asyncio.Task] = set()
+
+            async def run_capture(payload):
+                try:
+                    async with capture_limit:
+                        await self._run_screenshot_request(payload, ws, pending, send_lock)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.exception("Screenshot request processing failed (%s)", type(exc).__name__)
+
+            try:
+                while not stop.is_set():
+                    payload = await screenshot_requests.get()
+                    task = asyncio.create_task(run_capture(payload))
+                    active_captures.add(task)
+                    task.add_done_callback(active_captures.discard)
+            finally:
+                for task in active_captures:
+                    task.cancel()
+                if active_captures:
+                    await asyncio.gather(*active_captures, return_exceptions=True)
 
         async def exam_browser_scan_loop():
             while not stop.is_set():

@@ -8,7 +8,7 @@ import { roomsApi } from "../rooms/api";
 import { examsApi, type ExamPolicy } from "./api";
 
 const emptyPolicy: ExamPolicy = { network_mode: "MONITOR", allowed_networks: [], restricted_apps: [],
-  restrict_browsers: false, restricted_browsers: [], block_usb_storage: false, screenshot_on_violation: false };
+  restrict_browsers: false, restricted_browsers: [], block_usb_storage: false, screenshot_on_violation: true };
 const localInputDate = (value: Date) => new Date(value.getTime() - value.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 
 export function ExamsPage() {
@@ -67,7 +67,7 @@ export function ExamsPage() {
           <label className="flex items-center gap-2 text-[10px]"><input type="checkbox" checked={policy.network_mode === "ALLOW_LIST"} onChange={(e) => setPolicy({ ...policy, network_mode: e.target.checked ? "ALLOW_LIST" : "MONITOR" })} />Configure network allow-list policy</label>
           <label className="flex items-center gap-2 text-[10px]"><input type="checkbox" checked={policy.block_usb_storage} onChange={(e) => setPolicy({ ...policy, block_usb_storage: e.target.checked })} />Request USB storage restriction</label>
           <label className="flex items-center gap-2 text-[10px]"><input type="checkbox" checked={policy.restrict_browsers} onChange={(e) => setPolicy({ ...policy, restrict_browsers: e.target.checked })} />Restrict common browsers (Edge, Chrome, Firefox)</label>
-          <label className="flex items-center gap-2 text-[10px]"><input type="checkbox" checked={policy.screenshot_on_violation} onChange={(e) => setPolicy({ ...policy, screenshot_on_violation: e.target.checked })} />Request screenshot when a violation is detected</label>
+          <p className="m-0 text-[10px] text-[var(--color-muted)]">Every exam violation queues four screenshots: immediately, then after 10, 20, and 30 seconds.</p>
           <label className="text-[10px]">Allowed IP/CIDR ranges<textarea disabled={policy.network_mode !== "ALLOW_LIST"} value={networksText} onChange={(e) => setNetworksText(e.target.value)} placeholder="10.0.0.0/8, 2001:db8::/32" className="mt-1 block min-h-16 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2" /></label>
           <label className="text-[10px] md:col-span-2">Restricted executable names<textarea value={appsText} onChange={(e) => setAppsText(e.target.value)} placeholder="game.exe, discord.exe" className="mt-1 block min-h-16 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2" /></label>
         </div>
@@ -88,8 +88,18 @@ export function ExamsPage() {
     {reportId && <Panel className="print:border-0 print:shadow-none"><PanelTitle aside={<div className="flex gap-2 print:hidden"><Button onClick={() => window.print()}><Download size={14} /> Export / Print PDF</Button><Button onClick={() => setReportId(null)}>Close</Button></div>}>Exam report</PanelTitle>
       {report.isLoading ? <Skeleton /> : report.error ? <QueryError error={report.error} /> : report.data && <div className="mt-3 space-y-3">
         <div><h2 className="m-0 text-base font-bold">{report.data.exam.title}</h2><p className="text-[10px]">{report.data.exam.room_name} · {new Date(report.data.exam.starts_at).toLocaleString()} – {new Date(report.data.exam.ends_at).toLocaleString()} · {report.data.exam.status}</p></div>
-        <h3 className="text-xs font-bold">PC integrity status</h3><div className="grid gap-2 md:grid-cols-2">{report.data.devices.map((device) => <div key={device.device_id} className="rounded-md border border-[var(--color-border)] p-2 text-[10px]"><strong>{device.device_name}</strong> · {device.agent_state} · {device.violation_count} alerts<br/><small>Last heartbeat: {device.last_heartbeat_at ? new Date(device.last_heartbeat_at).toLocaleString() : "Never"}</small></div>)}</div>
-        <h3 className="text-xs font-bold">Integrity alerts ({report.data.violations.length})</h3>{report.data.violations.map((item) => { const captureId = item.details.screenshot_capture_id; const detail = item.details.remote_ip ?? item.details.name; return <div key={item.id} className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] py-2 text-[10px]"><ShieldAlert size={14} />{new Date(item.occurred_at).toLocaleString()} · {item.kind} · {item.severity} · {report.data!.devices.find((d) => d.device_id === item.device_id)?.device_name ?? item.device_id}{typeof detail === "string" && ` · ${detail}`}{typeof captureId === "string" && <> · <a href="/screenshots" className="underline">Evidence requested ({captureId.slice(0, 8)})</a></>}</div>; })}
+        <h3 className="text-xs font-bold">PC integrity status · {report.data.room_grid?.name ?? report.data.exam.room_name} layout</h3>
+        <div className="grid gap-2 print:gap-1" style={report.data.room_grid ? {
+          gridTemplateColumns: `repeat(${report.data.room_grid.columns}, minmax(0, 1fr))`,
+          gridTemplateRows: `repeat(${report.data.room_grid.rows}, minmax(4rem, auto))`,
+        } : undefined}>{report.data.devices.map((device) => <div key={device.device_id}
+          style={device.row !== null && device.column !== null ? { gridRow: device.row + 1, gridColumn: device.column + 1 } : undefined}
+          className="min-w-0 rounded-md border border-[var(--color-border)] p-2 text-[8px] print:p-1">
+          <strong className="block truncate">{device.device_name}</strong><StatusBadge value={device.agent_state} />
+          <span className="block">{device.violation_count} alerts</span>
+          <small>Heartbeat: {device.last_heartbeat_at ? new Date(device.last_heartbeat_at).toLocaleString() : "Never"}</small>
+        </div>)}</div>
+        <h3 className="text-xs font-bold">Integrity alerts ({report.data.violations.length})</h3>{report.data.violations.map((item) => { const captureIds = item.details.screenshot_capture_ids; const captureId = item.details.screenshot_capture_id; const captureCount = Array.isArray(captureIds) ? captureIds.length : (typeof captureId === "string" ? 1 : 0); const detail = item.details.remote_ip ?? item.details.name; return <div key={item.id} className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] py-2 text-[10px]"><ShieldAlert size={14} />{new Date(item.occurred_at).toLocaleString()} · {item.kind} · {item.severity} · {report.data!.devices.find((d) => d.device_id === item.device_id)?.device_name ?? item.device_id}{typeof detail === "string" && ` · ${detail}`}{captureCount > 0 && <> · <a href="/screenshots" className="underline">Evidence requested ({captureCount} captures)</a></>}</div>; })}
         <p className="text-[8px] text-[var(--color-muted)]">Generated {new Date(report.data.generated_at).toLocaleString()}. Use the browser print dialog to save as PDF.</p>
       </div>}
     </Panel>}

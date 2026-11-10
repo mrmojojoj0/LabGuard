@@ -171,7 +171,7 @@ class ExamPolicyIn(BaseModel):
     restrict_browsers: StrictBool = False
     restricted_browsers: list[StrictStr] = Field(default_factory=list, max_length=16)
     block_usb_storage: StrictBool = False
-    screenshot_on_violation: StrictBool = False
+    screenshot_on_violation: StrictBool = True
 
     @field_validator("allowed_networks")
     @classmethod
@@ -207,6 +207,7 @@ class ExamPolicyIn(BaseModel):
         # Store the executable match list with the policy, but let administrators
         # choose it through one supported toggle rather than entering process names.
         self.restricted_browsers = ["msedge.exe", "chrome.exe", "firefox.exe"] if self.restrict_browsers else []
+        self.screenshot_on_violation = True
         return self
 
 
