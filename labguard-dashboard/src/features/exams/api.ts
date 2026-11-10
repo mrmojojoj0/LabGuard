@@ -25,8 +25,9 @@ export interface Exam {
 }
 export interface ExamReport {
   exam: Exam;
+  room_grid: { name: string; rows: number; columns: number } | null;
   devices: Array<{ device_id: string; device_name: string; agent_state: string;
-    last_heartbeat_at: string | null; violation_count: number }>;
+    last_heartbeat_at: string | null; violation_count: number; row: number | null; column: number | null }>;
   violations: Array<{ id: string; device_id: string; kind: string; severity: string;
     occurred_at: string; details: Record<string, unknown> }>;
   generated_at: string;

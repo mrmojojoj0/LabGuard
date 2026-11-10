@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from labguard_server.models import (AuditEvent, Device, DevicePosition, DeviceStatus, Exam,
                                     ExamViolation, Room, ScreenshotCapture, DevicePeripheralEvent,
                                     DeviceWfpEvent, now_utc)
-from labguard_server.schemas import ExamCreate
+from labguard_server.schemas import ExamCreate, ExamBrowserScanIn
 
 
 def _aware(value: datetime) -> datetime:
@@ -90,11 +90,95 @@ def transition_schedules(db: Session) -> list[tuple[UUID, str]]:
     return changes
 
 
-def record_health_violations(db: Session) -> list[tuple[UUID, UUID]]:
+def _schedule_violation_captures(db: Session, exam: Exam, device_id: UUID,
+                                violation: ExamViolation, occurred_at: datetime) -> list[dict]:
+    """Queue captures at violation time and 10, 20, and 30 seconds later."""
+    if not (exam.policy_json or {}).get("screenshot_on_violation"):
+        return []
+    device = db.get(Device, device_id)
+    if device is None or not device.enabled:
+        return []
+    requested_at = now_utc()
+    jobs = []
+    capture_ids = []
+    for offset in (0, 10, 20, 30):
+        scheduled_at = requested_at + timedelta(seconds=offset)
+        capture = ScreenshotCapture(device_id=device_id, requested_by=None,
+            device_name=device.assigned_name or device.hostname, status="PENDING",
+            created_at=requested_at, scheduled_at=scheduled_at,
+            expires_at=requested_at + timedelta(hours=24))
+        db.add(capture)
+        db.flush()
+        capture_ids.append(str(capture.id))
+        jobs.append({"device_id": device_id, "capture_id": capture.id,
+            "scheduled_at": scheduled_at,
+            "expires_at": (scheduled_at + timedelta(seconds=90)).isoformat()})
+        db.add(AuditEvent(actor_type="SYSTEM", actor_id=None, action="exam.screenshot_requested",
+            target_type="screenshot_capture", target_id=str(capture.id), result="SUCCESS",
+            metadata_json=f'{{"exam_id":"{exam.id}","violation_id":"{violation.id}","offset_seconds":{offset}}}'))
+    violation.details = {**(violation.details or {}), "screenshot_capture_ids": capture_ids,
+        "screenshot_offsets_seconds": [0, 10, 20, 30]}
+    return jobs
+
+
+async def dispatch_exam_capture(application, job: dict) -> bool:
+    """Send a due capture once and persist its dispatch/failure state."""
+    from labguard_server.websocket import send_screenshot_request
+    device_id = job["device_id"]
+    capture_id = job["capture_id"]
+    sent = await send_screenshot_request(application, device_id, {
+        "capture_id": str(capture_id), "expires_at": job["expires_at"]})
+    with application.state.session_factory() as db:
+        capture = db.get(ScreenshotCapture, capture_id)
+        if capture is None or capture.status != "PENDING":
+            return False
+        capture.dispatched_at = now_utc()
+        if not sent:
+            capture.status, capture.error_code = "FAILED", "agent_unavailable"
+        db.commit()
+    return sent
+
+
+async def exam_evidence_monitor(application):
+    """Dispatch scheduled follow-up captures near their requested offsets."""
+    while True:
+        try:
+            now = now_utc()
+            with application.state.session_factory() as db:
+                rows = db.scalars(select(ScreenshotCapture).where(
+                    ScreenshotCapture.requested_by.is_(None),
+                    ScreenshotCapture.status == "PENDING",
+                    ScreenshotCapture.scheduled_at.is_not(None),
+                    ScreenshotCapture.scheduled_at <= now,
+                    ScreenshotCapture.dispatched_at.is_(None),
+                ).order_by(ScreenshotCapture.scheduled_at).limit(100)).all()
+                jobs = [{"device_id": row.device_id, "capture_id": row.id,
+                    "scheduled_at": row.scheduled_at,
+                    "expires_at": (row.scheduled_at + timedelta(seconds=90)).isoformat()}
+                    for row in rows]
+            for job in jobs:
+                if now_utc() > job["scheduled_at"] + timedelta(seconds=90):
+                    with application.state.session_factory() as db:
+                        row = db.get(ScreenshotCapture, job["capture_id"])
+                        if row and row.status == "PENDING" and row.dispatched_at is None:
+                            row.status, row.error_code = "FAILED", "capture_schedule_missed"
+                            db.commit()
+                    continue
+                await dispatch_exam_capture(application, job)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            import logging
+            logging.getLogger("labguard_server.exams").exception("Exam evidence dispatch failed")
+        await asyncio.sleep(1)
+
+
+def record_health_violations(db: Session) -> tuple[list[tuple[UUID, UUID]], list[dict]]:
     """Record one auditable integrity alert per agent offline episode in active exams."""
     now = now_utc()
     exams = db.scalars(select(Exam).where(Exam.status == "ACTIVE")).all()
     added = []
+    captures = []
     for exam in exams:
         for device_id_text in exam.device_ids:
             device_id = UUID(device_id_text)
@@ -107,13 +191,16 @@ def record_health_violations(db: Session) -> list[tuple[UUID, UUID]]:
                 ExamViolation.exam_id == exam.id, ExamViolation.event_key == event_key).limit(1))
             if exists:
                 continue
-            db.add(ExamViolation(exam_id=exam.id, device_id=device_id, event_key=event_key,
+            violation = ExamViolation(exam_id=exam.id, device_id=device_id, event_key=event_key,
                 kind="AGENT_OFFLINE", severity="HIGH", details={"agent_state": status.agent_state if status else "NEVER_CONNECTED"},
-                occurred_at=now))
+                occurred_at=now)
+            db.add(violation)
+            db.flush()
+            captures.extend(_schedule_violation_captures(db, exam, device_id, violation, now))
             added.append((exam.id, device_id))
-    if added:
+    if added or captures:
         db.commit()
-    return added
+    return added, captures
 
 
 def scan_policy_violations(db: Session) -> tuple[list[tuple[UUID, UUID]], list[dict]]:
@@ -162,54 +249,85 @@ def scan_policy_violations(db: Session) -> tuple[list[tuple[UUID, UUID]], list[d
             db.add(AuditEvent(actor_type="SYSTEM", actor_id=None, action="exam.violation",
                 target_type="exam_violation", target_id=str(violation.id), result="SUCCESS",
                 metadata_json=f'{{"exam_id":"{exam.id}","device_id":"{device_id}","kind":"{kind}"}}'))
-            if policy.get("screenshot_on_violation"):
-                # Limit automatic evidence to one capture per device per five minutes.
-                recent = db.scalar(select(ScreenshotCapture.id).where(
-                    ScreenshotCapture.device_id == device_id, ScreenshotCapture.requested_by.is_(None),
-                    ScreenshotCapture.created_at >= now - timedelta(minutes=5)).limit(1))
-                if recent is None:
-                    device = db.get(Device, device_id)
-                    if device and device.enabled:
-                        capture = ScreenshotCapture(device_id=device_id, requested_by=None,
-                            device_name=device.assigned_name or device.hostname, status="PENDING",
-                            created_at=now, expires_at=now + timedelta(hours=24))
-                        db.add(capture)
-                        db.flush()
-                        violation.details = {**details, "screenshot_capture_id": str(capture.id)}
-                        captures.append({"device_id": device_id,
-                            "payload": {"capture_id": str(capture.id),
-                                "expires_at": (now + timedelta(seconds=90)).isoformat()}})
-                        db.add(AuditEvent(actor_type="SYSTEM", actor_id=None, action="exam.screenshot_requested",
-                            target_type="screenshot_capture", target_id=str(capture.id), result="SUCCESS",
-                            metadata_json=f'{{"exam_id":"{exam.id}","violation_id":"{violation.id}"}}'))
+            captures.extend(_schedule_violation_captures(db, exam, device_id, violation, occurred_at))
     if created or captures:
         db.commit()
     return created, captures
 
 
+def record_browser_scan(db: Session, device_id: UUID, scan: ExamBrowserScanIn) -> tuple[list[UUID], list[dict]]:
+    """Record only common browser matches reported during an active restricted exam."""
+    now = now_utc()
+    rows = db.scalars(select(Exam).where(Exam.status == "ACTIVE")).all()
+    matched = []
+    captures = []
+    for exam in rows:
+        if str(device_id) not in exam.device_ids:
+            continue
+        policy = exam.policy_json or {}
+        if not policy.get("restrict_browsers"):
+            continue
+        restricted = {str(name).casefold() for name in policy.get("restricted_browsers", [])}
+        for browser in scan.browsers:
+            name = browser.name.casefold()
+            if name not in restricted:
+                continue
+            key = f"browser-running:{device_id}:{name}"
+            if db.scalar(select(ExamViolation.id).where(
+                    ExamViolation.exam_id == exam.id, ExamViolation.event_key == key).limit(1)):
+                continue
+            violation = ExamViolation(exam_id=exam.id, device_id=device_id, event_key=key,
+                kind="RESTRICTED_BROWSER_RUNNING", severity="HIGH",
+                details={"name": name, "count": browser.count, "scan_id": str(scan.scan_id)},
+                occurred_at=now)
+            db.add(violation)
+            db.flush()
+            matched.append(exam.id)
+            db.add(AuditEvent(actor_type="SYSTEM", actor_id=None, action="exam.violation",
+                target_type="exam_violation", target_id=str(violation.id), result="SUCCESS",
+                metadata_json=f'{{"exam_id":"{exam.id}","device_id":"{device_id}","kind":"RESTRICTED_BROWSER_RUNNING"}}'))
+            captures.extend(_schedule_violation_captures(db, exam, device_id, violation, now))
+    if matched:
+        db.commit()
+    return list(dict.fromkeys(matched)), captures
+
+
 async def exam_monitor(application):
+    browser_scan_sent: dict[UUID, float] = {}
     while True:
         try:
             with application.state.session_factory() as db:
-                violations = record_health_violations(db)
+                violations, health_captures = record_health_violations(db)
                 policy_violations, captures = scan_policy_violations(db)
                 changes = transition_schedules(db)
+                browser_targets = []
+                for exam in db.scalars(select(Exam).where(Exam.status == "ACTIVE")).all():
+                    policy = exam.policy_json or {}
+                    if policy.get("restrict_browsers"):
+                        names = policy.get("restricted_browsers") or ["msedge.exe", "chrome.exe", "firefox.exe"]
+                        browser_targets.extend((UUID(value), names) for value in exam.device_ids)
             for exam_id, status in changes:
                 application.state.admin_events.publish({"type": "exam.updated", "exam_id": str(exam_id), "status": status})
             for exam_id, device_id in violations:
                 application.state.admin_events.publish({"type": "exam.violation", "exam_id": str(exam_id), "device_id": str(device_id)})
             for exam_id, device_id in policy_violations:
                 application.state.admin_events.publish({"type": "exam.violation", "exam_id": str(exam_id), "device_id": str(device_id)})
-            from labguard_server.websocket import send_screenshot_request
-            for item in captures:
-                device_id = item["device_id"]
-                sent = await send_screenshot_request(application, device_id, item["payload"])
-                if not sent:
-                    with application.state.session_factory() as db:
-                        capture = db.get(ScreenshotCapture, UUID(item["payload"]["capture_id"]))
-                        if capture and capture.status == "PENDING":
-                            capture.status, capture.error_code = "FAILED", "agent_unavailable"
-                            db.commit()
+            import time
+            from labguard_server.websocket import send_exam_browser_scan
+            active_scan_devices = {device_id for device_id, _ in browser_targets}
+            browser_scan_sent = {device_id: sent_at for device_id, sent_at in browser_scan_sent.items()
+                if device_id in active_scan_devices}
+            now_mono = time.monotonic()
+            for device_id, browser_names in browser_targets:
+                if now_mono - browser_scan_sent.get(device_id, 0) < 15:
+                    continue
+                sent = await send_exam_browser_scan(application, device_id, {
+                    "scan_id": str(uuid4()), "browser_names": browser_names})
+                if sent:
+                    browser_scan_sent[device_id] = now_mono
+            for item in [*health_captures, *captures]:
+                if item["scheduled_at"] <= now_utc():
+                    await dispatch_exam_capture(application, item)
         except asyncio.CancelledError:
             raise
         except Exception:

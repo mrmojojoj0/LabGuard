@@ -15,7 +15,7 @@ from labguard_server.events import AdminEventHub
 from labguard_server.websocket import router as websocket_router, status_monitor, telemetry_retention_monitor
 from labguard_server.software_jobs import software_job_monitor
 from labguard_server.screenshot_service import screenshot_retention_monitor
-from labguard_server.exam_management import exam_monitor
+from labguard_server.exam_management import exam_monitor, exam_evidence_monitor
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -39,6 +39,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         software_monitor = asyncio.create_task(software_job_monitor(application))
         screenshot_monitor = asyncio.create_task(screenshot_retention_monitor(application))
         exam_schedule_monitor = asyncio.create_task(exam_monitor(application))
+        exam_evidence_task = asyncio.create_task(exam_evidence_monitor(application))
         try:
             yield
         finally:
@@ -47,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             software_monitor.cancel()
             screenshot_monitor.cancel()
             exam_schedule_monitor.cancel()
+            exam_evidence_task.cancel()
             try:
                 await monitor
             except asyncio.CancelledError:
@@ -61,6 +63,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pass
             try:
                 await exam_schedule_monitor
+            except asyncio.CancelledError:
+                pass
+            try:
+                await exam_evidence_task
             except asyncio.CancelledError:
                 pass
             try:

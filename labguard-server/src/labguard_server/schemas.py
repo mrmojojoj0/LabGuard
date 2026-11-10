@@ -238,6 +238,18 @@ class ExamCreate(BaseModel):
         return self
 
 
+class BrowserProcessCountIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: StrictStr = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_.-]+\.exe$")
+    count: StrictInt = Field(ge=1, le=1000)
+
+
+class ExamBrowserScanIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scan_id: UUID
+    browsers: list[BrowserProcessCountIn] = Field(max_length=8)
+
+
 class ExamOut(BaseModel):
     id: UUID
     room_id: UUID

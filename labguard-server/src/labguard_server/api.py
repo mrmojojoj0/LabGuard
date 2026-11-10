@@ -81,6 +81,9 @@ def get_exam_report(exam_id: UUID, _admin=Depends(require_role("VIEWER")), db: S
     exam = db.get(Exam, exam_id)
     if exam is None:
         raise HTTPException(404, detail={"code": "not_found", "message": "Exam not found."})
+    room = db.get(Room, exam.room_id)
+    positions = {row.device_id: row for row in db.scalars(select(DevicePosition).where(
+        DevicePosition.room_id == exam.room_id)).all()}
     devices = []
     for device_id_text in exam.device_ids:
         device_id = UUID(device_id_text)
@@ -89,13 +92,18 @@ def get_exam_report(exam_id: UUID, _admin=Depends(require_role("VIEWER")), db: S
             continue
         violations = db.scalar(select(func.count(ExamViolation.id)).where(
             ExamViolation.exam_id == exam.id, ExamViolation.device_id == device_id)) or 0
+        position = positions.get(device_id)
         devices.append({"device_id": str(device_id), "device_name": device.assigned_name or device.hostname,
             "agent_state": state.agent_state if state else "NEVER_CONNECTED",
             "last_heartbeat_at": state.last_heartbeat_at if state else None,
-            "violation_count": violations})
+            "violation_count": violations,
+            "row": position.row_index if position else None,
+            "column": position.column_index if position else None})
     alerts = db.scalars(select(ExamViolation).where(ExamViolation.exam_id == exam.id)
         .order_by(ExamViolation.occurred_at.desc()).limit(1000)).all()
-    return {"exam": exam_out(db, exam), "devices": devices,
+    return {"exam": exam_out(db, exam),
+        "room_grid": {"name": room.name, "rows": room.grid_rows, "columns": room.grid_columns} if room else None,
+        "devices": devices,
         "violations": [{"id": str(item.id), "device_id": str(item.device_id), "kind": item.kind,
             "severity": item.severity, "occurred_at": item.occurred_at, "details": item.details} for item in alerts],
         "generated_at": now_utc()}

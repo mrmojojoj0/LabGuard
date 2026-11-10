@@ -23,9 +23,11 @@ from labguard_server.schemas import ProcessResultIn
 from labguard_server.schemas import PeripheralSnapshotIn
 from labguard_server.peripheral_activity import record_peripheral_snapshot
 from labguard_server.schemas import ScreenshotChunkIn, ScreenshotCaptureFailedIn
+from labguard_server.schemas import ExamBrowserScanIn
 from labguard_server.screenshot_service import receive_chunk, fail_capture
 from labguard_server.schemas import WfpEventBatchIn
 from labguard_server.wfp_activity import record_wfp_batch
+from labguard_server.exam_management import record_browser_scan, dispatch_exam_capture
 
 router = APIRouter(prefix="/api/v1")
 MAX_FRAME_BYTES = 64 * 1024
@@ -93,6 +95,12 @@ def _persist_rdp_result(factory, device_id, sequence, payload):
 def _persist_process_result(factory, device_id, sequence, payload):
     with factory() as db:
         return record_process_result(db, device_id, sequence, payload)
+
+
+def _persist_exam_browser_scan(factory, device_id, sequence, payload):
+    with factory() as db:
+        record_agent_event(db, device_id, sequence, "client.exam.browser_scan")
+        return record_browser_scan(db, device_id, payload)
 
 
 def _persist_peripheral_snapshot(factory, device_id, sequence, payload):
@@ -189,6 +197,17 @@ async def send_process_request(application, device_id: UUID, payload: dict) -> b
         return False
 
 
+async def send_exam_browser_scan(application, device_id: UUID, payload: dict) -> bool:
+    websocket = application.state.active_devices.get(device_id)
+    if websocket is None:
+        return False
+    try:
+        await _send(websocket, device_id, "server.exam.browser_scan", payload)
+        return True
+    except (RuntimeError, WebSocketDisconnect):
+        return False
+
+
 async def dispatch_pending_process_requests(application, device_id: UUID) -> None:
     with application.state.session_factory() as db:
         now = now_utc()
@@ -280,6 +299,7 @@ async def agent_session(websocket: WebSocket):
                                   "client.job.accepted", "client.job.started", "client.job.progress",
                                   "client.job.completed", "client.job.failed", "client.rdp.access.result",
                                   "client.process.result", "client.peripheral.snapshot",
+                                  "client.exam.browser_scan",
                                   "client.network.wfp", "client.screenshot.chunk", "client.screenshot.failed"}:
                 await websocket.close(code=4400, reason="unsupported_event")
                 return
@@ -498,6 +518,38 @@ async def agent_session(websocket: WebSocket):
                         "request_id": str(process_result.request_id), "status": result.get("status")})
                 await _send(websocket, device_id, "server.ack", {
                     "event_id": str(event.event_id), **result})
+                continue
+            if event.type == "client.exam.browser_scan":
+                try:
+                    scan = ExamBrowserScanIn.model_validate(event.payload)
+                except ValidationError:
+                    await _send(websocket, device_id, "server.ack", {
+                        "event_id": str(event.event_id), "accepted": False,
+                        "reason": "invalid_exam_browser_scan"})
+                    continue
+                try:
+                    exam_ids, captures = await asyncio.to_thread(_persist_exam_browser_scan,
+                        websocket.app.state.session_factory, device_id, event.sequence, scan)
+                except HTTPException:
+                    await websocket.close(code=4401, reason="device_not_authorized_or_replayed")
+                    return
+                except Exception:
+                    logging.getLogger("labguard_server.websocket").exception(
+                        "Failed storing exam browser scan")
+                    exam_ids, captures = [], []
+                    accepted = False
+                else:
+                    accepted = True
+                if accepted:
+                    for exam_id in exam_ids:
+                        websocket.app.state.admin_events.publish({"type": "exam.violation",
+                            "exam_id": str(exam_id), "device_id": str(device_id)})
+                await _send(websocket, device_id, "server.ack", {"event_id": str(event.event_id),
+                    "accepted": accepted, "violations": len(exam_ids) if accepted else 0})
+                if accepted and captures:
+                    for capture in captures:
+                        if capture["scheduled_at"] <= now_utc():
+                            await dispatch_exam_capture(websocket.app, capture)
                 continue
             if event.type in {"client.screenshot.chunk", "client.screenshot.failed"}:
                 try:

@@ -1,10 +1,13 @@
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tests.conftest import login
+from labguard_server.exam_management import record_browser_scan
+from labguard_server.models import Exam, ExamViolation
+from labguard_server.schemas import ExamBrowserScanIn
 
 
 def _device(client, headers, name="EXAM-PC-01"):
@@ -62,3 +65,29 @@ def test_exam_rejects_unassigned_targets_conflicts_and_invalid_policy(client):
         json=_exam_body(str(uuid4()), device_id)).status_code == 404
     assert client.post("/api/v1/exams", headers=headers, json=body).status_code == 201
     assert client.post("/api/v1/exams", headers=headers, json=body).status_code == 409
+
+
+def test_active_browser_restriction_creates_one_deduplicated_violation(client):
+    headers = {"X-CSRF-Token": login(client)}
+    room, device_id = _device(client, headers)
+    response = client.post("/api/v1/exams", headers=headers, json=_exam_body(room["id"], device_id))
+    assert response.status_code == 201, response.text
+    exam_id = response.json()["id"]
+    with client.app.state.session_factory.begin() as db:
+        exam = db.get(Exam, exam_id)
+        exam.status = "ACTIVE"
+        exam.starts_at = datetime.now(UTC) - timedelta(minutes=1)
+
+    scan = ExamBrowserScanIn.model_validate({"scan_id": str(uuid4()),
+        "browsers": [{"name": "chrome.exe", "count": 2}]})
+    with client.app.state.session_factory() as db:
+        exam_ids, captures = record_browser_scan(db, UUID(device_id), scan)
+    assert exam_ids == [UUID(exam_id)]
+    assert len(captures) == 1
+    with client.app.state.session_factory() as db:
+        exam_ids, _ = record_browser_scan(db, UUID(device_id), scan)
+        alerts = db.query(ExamViolation).filter(ExamViolation.exam_id == UUID(exam_id)).all()
+    assert exam_ids == []
+    assert len(alerts) == 1
+    assert alerts[0].kind == "RESTRICTED_BROWSER_RUNNING"
+    assert alerts[0].details["count"] == 2

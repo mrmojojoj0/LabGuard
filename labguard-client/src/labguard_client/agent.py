@@ -123,7 +123,8 @@ class AgentClient:
                                  inventory_requests: asyncio.Queue, job_offers: asyncio.Queue | None = None,
                                  rdp_requests: asyncio.Queue | None = None,
                                  process_requests: asyncio.Queue | None = None,
-                                 screenshot_requests: asyncio.Queue | None = None):
+                                 screenshot_requests: asyncio.Queue | None = None,
+                                 exam_browser_scans: asyncio.Queue | None = None):
         while True:
             message = json.loads(await ws.recv())
             if message.get("type") == "server.software_job.offer":
@@ -179,6 +180,18 @@ class AgentClient:
                 except asyncio.QueueFull:
                     logging.getLogger("labguard_client").warning("Screenshot request queue is full")
                 continue
+            if message.get("type") == "server.exam.browser_scan":
+                if (message.get("protocol") != "labguard.agent"
+                        or message.get("schema_version") != 1
+                        or message.get("device_id") != self.identity.device_id
+                        or exam_browser_scans is None):
+                    logging.getLogger("labguard_client").warning("Rejected exam browser scan envelope")
+                    continue
+                try:
+                    exam_browser_scans.put_nowait(message.get("payload"))
+                except asyncio.QueueFull:
+                    logging.getLogger("labguard_client").warning("Exam browser scan queue is full")
+                continue
             if message.get("type") != "server.ack":
                 continue
             event_id = message.get("payload", {}).get("event_id")
@@ -216,6 +229,7 @@ class AgentClient:
         rdp_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=4)
         process_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=4)
         screenshot_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
+        exam_browser_scans: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
 
         async def heartbeat_loop():
             while not await self._wait_or_stop(stop, self.heartbeat_interval):
@@ -312,6 +326,37 @@ class AgentClient:
                 payload = await screenshot_requests.get()
                 await self._run_screenshot_request(payload, ws, pending, send_lock)
 
+        async def exam_browser_scan_loop():
+            while not stop.is_set():
+                payload = await exam_browser_scans.get()
+                try:
+                    if not isinstance(payload, dict) or set(payload) != {"scan_id", "browser_names"}:
+                        continue
+                    scan_id = str(UUID(payload["scan_id"]))
+                    requested = payload["browser_names"]
+                    supported = {"msedge.exe", "chrome.exe", "firefox.exe"}
+                    if (not isinstance(requested, list) or len(requested) > 8
+                            or any(not isinstance(name, str) for name in requested)):
+                        continue
+                    names = {name.casefold() for name in requested} & supported
+                    processes = await asyncio.to_thread(list_processes, limit=MAX_PROCESSES)
+                    counts = {}
+                    for process in processes:
+                        name = str(process.get("name") or "").casefold()
+                        if name in names:
+                            counts[name] = counts.get(name, 0) + 1
+                    result = await self._send_session_event(ws, "client.exam.browser_scan", {
+                        "scan_id": scan_id,
+                        "browsers": [{"name": name, "count": count}
+                                     for name, count in sorted(counts.items())]}, pending, send_lock)
+                    if not result.get("accepted"):
+                        logger.warning("Exam browser scan was rejected by server (%s)",
+                                       result.get("reason", "unknown"))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Exam browser scan failed (%s)", type(exc).__name__)
+
         async def peripheral_snapshot_loop():
             last_signature = None
             last_sent_at = 0.0
@@ -339,13 +384,14 @@ class AgentClient:
                 if await self._wait_or_stop(stop, 5):
                     break
 
-        tasks = [asyncio.create_task(self._read_session_acks(ws, pending, inventory_requests, job_offers, rdp_requests, process_requests, screenshot_requests)),
+        tasks = [asyncio.create_task(self._read_session_acks(ws, pending, inventory_requests, job_offers, rdp_requests, process_requests, screenshot_requests, exam_browser_scans)),
                  asyncio.create_task(heartbeat_loop()), asyncio.create_task(telemetry_loop()),
                  asyncio.create_task(software_inventory_loop()),
                  asyncio.create_task(software_job_loop()), asyncio.create_task(rdp_access_loop()),
                  asyncio.create_task(process_request_loop()), asyncio.create_task(stop.wait()),
                  asyncio.create_task(peripheral_snapshot_loop()), asyncio.create_task(wfp_event_loop())]
         tasks.append(asyncio.create_task(screenshot_request_loop()))
+        tasks.append(asyncio.create_task(exam_browser_scan_loop()))
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             if tasks[7] in done:
