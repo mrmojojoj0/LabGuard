@@ -3,6 +3,7 @@ from ipaddress import IPv4Address, IPv6Address
 from datetime import date
 import re
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, StrictBool, StrictInt, StrictStr, field_validator, model_validator
@@ -39,6 +40,18 @@ class DeviceTicketRequest(BaseModel):
 
 class DeviceApproval(BaseModel):
     assigned_name: str = Field(min_length=1, max_length=100)
+
+
+class DeviceRename(BaseModel):
+    assigned_name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("assigned_name")
+    @classmethod
+    def non_blank_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Device name cannot be blank")
+        return value
 
 
 class DeviceOut(BaseModel):
@@ -287,6 +300,79 @@ class RoomOut(BaseModel):
     description: str | None
     grid_rows: int
     grid_columns: int
+
+
+class LabCameraCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    stream_uri: StrictStr = Field(min_length=10, max_length=2048)
+
+    @field_validator("name")
+    @classmethod
+    def trim_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Camera name cannot be blank")
+        return value
+
+    @field_validator("stream_uri")
+    @classmethod
+    def validate_rtsp_uri(cls, value: str) -> str:
+        value = value.strip()
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"rtsp", "rtsps"} or not parsed.hostname or parsed.fragment or any(ord(ch) < 32 for ch in value):
+            raise ValueError("Enter a valid RTSP or RTSPS camera stream URL")
+        return value
+
+
+class LabCameraPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    stream_uri: StrictStr | None = Field(default=None, min_length=10, max_length=2048)
+    enabled: StrictBool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def trim_patch_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("Camera name cannot be blank")
+        return value
+
+    @field_validator("stream_uri")
+    @classmethod
+    def validate_patch_uri(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"rtsp", "rtsps"} or not parsed.hostname or parsed.fragment or any(ord(ch) < 32 for ch in value):
+            raise ValueError("Enter a valid RTSP or RTSPS camera stream URL")
+        return value
+
+
+class LabCameraOut(BaseModel):
+    id: UUID
+    room_id: UUID
+    room_name: str
+    name: str
+    enabled: bool
+    state: str
+    error_code: str | None
+    last_frame_at: datetime | None
+    stream_configured: bool = True
+
+
+class LabCameraDetectionOut(BaseModel):
+    id: UUID
+    camera_id: UUID
+    room_id: UUID
+    camera_name: str
+    room_name: str
+    label: str
+    count: int
+    confidence: float
+    occurred_at: datetime
 
 
 class CellAssignment(BaseModel):

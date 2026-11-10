@@ -16,6 +16,7 @@ from labguard_server.websocket import router as websocket_router, status_monitor
 from labguard_server.software_jobs import software_job_monitor
 from labguard_server.screenshot_service import screenshot_retention_monitor
 from labguard_server.exam_management import exam_monitor, exam_evidence_monitor
+from labguard_server.camera_monitoring import lab_camera_monitor
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -34,12 +35,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.active_devices = {}
         application.state.active_device_send_locks = {}
         application.state.software_refresh_requests = {}
+        application.state.camera_frames = {}
         monitor = asyncio.create_task(status_monitor(application))
         telemetry_monitor = asyncio.create_task(telemetry_retention_monitor(application))
         software_monitor = asyncio.create_task(software_job_monitor(application))
         screenshot_monitor = asyncio.create_task(screenshot_retention_monitor(application))
         exam_schedule_monitor = asyncio.create_task(exam_monitor(application))
         exam_evidence_task = asyncio.create_task(exam_evidence_monitor(application))
+        camera_monitor_task = asyncio.create_task(lab_camera_monitor(application))
         try:
             yield
         finally:
@@ -49,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             screenshot_monitor.cancel()
             exam_schedule_monitor.cancel()
             exam_evidence_task.cancel()
+            camera_monitor_task.cancel()
             try:
                 await monitor
             except asyncio.CancelledError:
@@ -67,6 +71,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pass
             try:
                 await exam_evidence_task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await camera_monitor_task
             except asyncio.CancelledError:
                 pass
             try:

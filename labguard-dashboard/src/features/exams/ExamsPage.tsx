@@ -25,6 +25,9 @@ export function ExamsPage() {
   const [appsText, setAppsText] = useState("");
   const [networksText, setNetworksText] = useState("");
   const [reportId, setReportId] = useState<string | null>(null);
+  const [eventsDeviceId, setEventsDeviceId] = useState<string | null>(null);
+  const [renameDeviceId, setRenameDeviceId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const selectedRoom = rooms.data?.find((room) => room.id === roomId);
   const layout = useQuery({ queryKey: ["room-layout", roomId], queryFn: () => roomsApi.layout(roomId), enabled: Boolean(roomId) });
   const assignedIds = useMemo(() => layout.data?.assignments.map((item) => item.device_id) ?? [], [layout.data]);
@@ -41,6 +44,15 @@ export function ExamsPage() {
     setTitle(""); void queryClient.invalidateQueries({ queryKey: ["exams"] });
   } });
   const cancel = useMutation({ mutationFn: examsApi.cancel, onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["exams"] }) });
+  const rename = useMutation({ mutationFn: ({ id, name }: { id: string; name: string }) => devicesApi.rename(id, name),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["devices"] }),
+        queryClient.invalidateQueries({ queryKey: ["exam-report", reportId] }),
+      ]);
+      setRenameDeviceId(null);
+    },
+  });
   const canManage = admin?.role === "LAB_ADMIN" || admin?.role === "SUPER_ADMIN";
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -96,9 +108,39 @@ export function ExamsPage() {
           style={device.row !== null && device.column !== null ? { gridRow: device.row + 1, gridColumn: device.column + 1 } : undefined}
           className="min-w-0 rounded-md border border-[var(--color-border)] p-2 text-[8px] print:p-1">
           <strong className="block truncate">{device.device_name}</strong><StatusBadge value={device.agent_state} />
-          <span className="block">{device.violation_count} alerts</span>
+          <span className={`mt-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-semibold ${device.violation_count > 0 ? "bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-200" : "bg-green-100 text-green-800 dark:bg-green-950/50 dark:text-green-200"}`}>
+            <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${device.violation_count > 0 ? "bg-red-600" : "bg-green-600"}`} />
+            {device.violation_count} alerts
+          </span>
+          <button type="button" onClick={() => setEventsDeviceId((current) => current === device.device_id ? null : device.device_id)}
+            aria-expanded={eventsDeviceId === device.device_id}
+            className="mt-1 w-fit rounded border border-[var(--color-border)] px-1.5 py-1 font-semibold hover:bg-[var(--color-surface-muted)] print:hidden">
+            {eventsDeviceId === device.device_id ? "Hide events" : "View events"}
+          </button>
+          {canManage && <button type="button" onClick={() => { setRenameDeviceId((current) => current === device.device_id ? null : device.device_id); setRenameValue(device.device_name); rename.reset(); }}
+            className="ml-1 mt-1 w-fit rounded border border-[var(--color-border)] px-1.5 py-1 font-semibold hover:bg-[var(--color-surface-muted)] print:hidden">
+            {renameDeviceId === device.device_id ? "Cancel rename" : "Rename PC"}
+          </button>}
           <small>Heartbeat: {device.last_heartbeat_at ? new Date(device.last_heartbeat_at).toLocaleString() : "Never"}</small>
         </div>)}</div>
+        {renameDeviceId && <form className="flex flex-wrap items-end gap-2 rounded-md border border-[var(--color-border)] p-3 print:hidden"
+          onSubmit={(event) => { event.preventDefault(); if (renameDeviceId && renameValue.trim()) rename.mutate({ id: renameDeviceId, name: renameValue.trim() }); }}>
+          <label className="text-[10px] font-semibold">New PC name
+            <input autoFocus required maxLength={100} value={renameValue} onChange={(event) => setRenameValue(event.target.value)}
+              className="mt-1 block h-9 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2" />
+          </label>
+          <Button disabled={!renameValue.trim() || rename.isPending}>{rename.isPending ? "Saving…" : "Save name"}</Button>
+          {rename.error && <span role="alert" className="text-[10px] text-red-700">{rename.error.message}</span>}
+        </form>}
+        {eventsDeviceId && <section className="rounded-md border border-[var(--color-border)] p-3" aria-label="PC exam events">
+          <h3 className="m-0 text-xs font-bold">Events · {report.data.devices.find((item) => item.device_id === eventsDeviceId)?.device_name ?? "PC"}</h3>
+          {report.data.violations.filter((item) => item.device_id === eventsDeviceId).length ?
+            <div className="mt-2">{report.data.violations.filter((item) => item.device_id === eventsDeviceId).map((item) => <div key={item.id} className="flex flex-wrap items-center gap-2 border-t border-[var(--color-border)] py-2 text-[10px]">
+              <ShieldAlert size={13} /><time>{new Date(item.occurred_at).toLocaleString()}</time><strong>{item.kind}</strong><span>{item.severity}</span>
+              {typeof (item.details.remote_ip ?? item.details.name) === "string" && <span>{String(item.details.remote_ip ?? item.details.name)}</span>}
+              {Array.isArray(item.details.screenshot_capture_ids) && item.details.screenshot_capture_ids.length > 0 && <a href="/screenshots" className="underline">View evidence ({item.details.screenshot_capture_ids.length})</a>}
+            </div>)}</div> : <p className="mb-0 text-[10px] text-[var(--color-muted)]">No exam alerts recorded for this PC.</p>}
+        </section>}
         <h3 className="text-xs font-bold">Integrity alerts ({report.data.violations.length})</h3>{report.data.violations.map((item) => { const captureIds = item.details.screenshot_capture_ids; const captureId = item.details.screenshot_capture_id; const captureCount = Array.isArray(captureIds) ? captureIds.length : (typeof captureId === "string" ? 1 : 0); const detail = item.details.remote_ip ?? item.details.name; return <div key={item.id} className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] py-2 text-[10px]"><ShieldAlert size={14} />{new Date(item.occurred_at).toLocaleString()} · {item.kind} · {item.severity} · {report.data!.devices.find((d) => d.device_id === item.device_id)?.device_name ?? item.device_id}{typeof detail === "string" && ` · ${detail}`}{captureCount > 0 && <> · <a href="/screenshots" className="underline">Evidence requested ({captureCount} captures)</a></>}</div>; })}
         <p className="text-[8px] text-[var(--color-muted)]">Generated {new Date(report.data.generated_at).toLocaleString()}. Use the browser print dialog to save as PDF.</p>
       </div>}

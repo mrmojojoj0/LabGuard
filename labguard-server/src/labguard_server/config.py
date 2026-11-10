@@ -29,6 +29,10 @@ class Settings:
     software_job_max_runtime_seconds: int = 1800
     ipinfo_token: str | None = None
     screenshot_storage_dir: str = "data/screenshots"
+    camera_encryption_key: str | None = None
+    camera_detection_model: str = "data/models/ssd_mobilenet_v1_12.onnx"
+    camera_sample_interval_seconds: int = 10
+    camera_event_retention_days: int = 30
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -57,6 +61,10 @@ class Settings:
             ipinfo_token=os.getenv("IPINFO_TOKEN") or None,
             screenshot_storage_dir=os.getenv("SCREENSHOT_STORAGE_DIR",
                 str(Path(__file__).resolve().parents[2] / "data" / "screenshots")),
+            camera_encryption_key=os.getenv("CAMERA_ENCRYPTION_KEY") or None,
+            camera_detection_model=os.getenv("CAMERA_DETECTION_MODEL", "data/models/ssd_mobilenet_v1_12.onnx"),
+            camera_sample_interval_seconds=int(os.getenv("CAMERA_SAMPLE_INTERVAL_SECONDS", "10")),
+            camera_event_retention_days=int(os.getenv("CAMERA_EVENT_RETENTION_DAYS", "30")),
         )
 
     def validate(self) -> None:
@@ -80,6 +88,10 @@ class Settings:
             raise RuntimeError("Software inventory cooldown, stale threshold, and retention are outside supported bounds")
         if not 60 <= self.software_job_max_runtime_seconds <= 7200:
             raise RuntimeError("Software job timeout must be between 60 and 7200 seconds")
+        if not 2 <= self.camera_sample_interval_seconds <= 300:
+            raise RuntimeError("Camera sample interval must be between 2 and 300 seconds")
+        if not 1 <= self.camera_event_retention_days <= 3650:
+            raise RuntimeError("Camera detection retention must be between 1 and 3650 days")
         if self.chocolatey_source_url:
             parsed = urlsplit(self.chocolatey_source_url)
             if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password

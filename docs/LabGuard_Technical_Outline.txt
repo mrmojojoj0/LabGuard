@@ -1,6 +1,6 @@
 LABGUARD TWO-PROJECT TECHNICAL SPECIFICATION Client Agent + Management
-Server Version: 1.0 Scope: Windows laboratory PC management
-(physical/CCTV monitoring excluded)
+Server Version: 1.0 Scope: Windows laboratory PC management with separately
+authorized RTSP item detection for lab monitoring.
 
 ====================================================================== 1.
 PROJECT OVERVIEW
@@ -30,8 +30,11 @@ authorized by the institution. Do not implement covert surveillance,
 credential collection, keylogging, stealth, security-control bypass, or
 unauthorized access.
 
-OUT OF SCOPE FOR THIS VERSION - CCTV, camera monitoring, YOLO, and
-physical behaviour monitoring. - Physical access control and attendance
+HISTORICAL SCOPE NOTE - CCTV, camera monitoring, and YOLO were excluded
+from the original version. The separately authorized Lab Camera Monitoring
+milestone now adds disclosed RTSP camera sampling and object-category
+detection. Identity recognition, audio capture, covert surveillance, and
+physical behaviour scoring remain out of scope. - Physical access control and attendance
 systems. - Decrypting HTTPS or VPN traffic. - Bypassing UAC, antivirus,
 endpoint security, or Windows protections. - Hidden remote control or
 invisible desktop interaction. - Arbitrary unrestricted command
@@ -540,7 +543,7 @@ devices to cells. - Save grid positions on server. - Show a clear state
 legend. - Use real server status, not static or browser-local status. -
 Allow filtering, search, bulk selection, and device detail view. - Grid
 is a visual representation of the physical seating plan only; it does
-not imply camera or physical monitoring.
+does not imply face identification or physical behaviour monitoring.
 
 ======================================================================
 6. COMMUNICATION CONTRACT

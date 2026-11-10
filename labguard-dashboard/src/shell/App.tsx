@@ -30,6 +30,7 @@ import {
   Settings,
   Sun,
   Usb,
+  Video,
   UserRoundCheck,
   X,
 } from "lucide-react";
@@ -48,6 +49,7 @@ import { NetworkMonitoringPage } from "../features/network/NetworkMonitoringPage
 import { FleetRemoteAccessPage, UsbMonitoringPage } from "../features/devices/FleetMonitoringPages";
 import { ScreenshotMonitoringPage } from "../features/devices/ScreenshotMonitoringPage";
 import { ExamsPage } from "../features/exams/ExamsPage";
+import { CamerasPage } from "../features/cameras/CamerasPage";
 import type { Device } from "../lib/types";
 
 type Nav = {
@@ -78,6 +80,7 @@ const groups: { title: string; items: Nav[] }[] = [
       { label: "Process Monitoring", path: "/processes", icon: Activity },
       { label: "Network Monitoring", path: "/network", icon: Network },
       { label: "USB Monitoring", path: "/usb", icon: Usb },
+      { label: "Lab Cameras", path: "/cameras", icon: Video },
       { label: "Remote Access", path: "/remote-access", icon: Headphones },
       { label: "Screenshots", path: "/screenshots", icon: Camera },
     ],
@@ -365,6 +368,12 @@ function AdminEventBridge() {
     };
     stream.addEventListener("exam.updated", refreshExams);
     stream.addEventListener("exam.violation", refreshExams);
+    const refreshCameras = () => {
+      void queryClient.invalidateQueries({ queryKey: ["lab-cameras"] });
+      void queryClient.invalidateQueries({ queryKey: ["lab-camera-detections"] });
+    };
+    stream.addEventListener("camera.updated", refreshCameras);
+    stream.addEventListener("camera.detection", refreshCameras);
     const deviceDeleted = (event: MessageEvent<string>) => {
       const id = (JSON.parse(event.data) as { device_id: string }).device_id;
       queryClient.setQueryData<Device[]>(["devices"], (current) =>
@@ -401,6 +410,7 @@ function RoutedShell() {
           <Route path="/devices/:id" element={<DeviceDetailPage />} />
           <Route path="/rooms" element={<RoomsPage />} />
           <Route path="/exams" element={<ExamsPage />} />
+          <Route path="/cameras" element={<CamerasPage />} />
           <Route path="/enrollment" element={<EnrollmentPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/audit" element={<AuditPage />} />

@@ -13,6 +13,8 @@ import type {
 } from "../../lib/types";
 export const devicesApi = {
   list: () => api<Device[]>("/devices"),
+  rename: (id: string, assigned_name: string) =>
+    api<Device>(`/devices/${id}`, { method: "PATCH", body: JSON.stringify({ assigned_name }) }),
   status: (id: string) => api<DeviceStatus>(`/devices/${id}/status`),
   remove: (id: string) => api<void>(`/devices/${id}`, { method: "DELETE" }),
   statuses: async (devices: Device[]) =>

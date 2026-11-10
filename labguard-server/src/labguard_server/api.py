@@ -7,17 +7,20 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from labguard_server.db import get_db
 from labguard_server.models import (AuditEvent, Device, DeviceAuthChallenge, DeviceCredential, DevicePosition,
                                     DeviceProcessRequest, DeviceStatus, DeviceStatusEvent, RdpAccessRequest, Room,
-                                    SoftwareCatalogPackage, SoftwareJob, ScreenshotCapture, Exam, ExamViolation, now_utc)
-from labguard_server.schemas import (DeviceApproval, DeviceChallengeRequest, DeviceOut, DeviceTicketRequest, EnrollmentCodeOut, EnrollmentRequestIn,
+                                    SoftwareCatalogPackage, SoftwareJob, ScreenshotCapture, Exam, ExamViolation,
+                                    LabCamera, now_utc)
+from labguard_server.schemas import (DeviceApproval, DeviceChallengeRequest, DeviceOut, DeviceRename, DeviceTicketRequest, EnrollmentCodeOut, EnrollmentRequestIn,
                                      LayoutOut, LoginRequest, RoomCreate, RoomLayout, RoomOut, RoomPatch,
                                      RdpAccessRequestOut, SoftwareCatalogPackageCreate, SoftwareJobCreate,
                                      ProcessRequestCreate, ProcessRequestOut, WingetCatalogImport)
 from labguard_server.schemas import ExamCreate
+from labguard_server.schemas import LabCameraCreate, LabCameraPatch
 from labguard_server.security import csrf_protected, digest, require_role
 from labguard_server.services import (approve_device, audit, authenticate, create_enrollment_code, create_room,
                                       create_device_challenge, delete_device, issue_device_ticket, save_layout, submit_enrollment,
@@ -44,6 +47,8 @@ from pathlib import Path as FilePath
 from labguard_server.winget_discovery import (WingetDiscoveryError, get_winget_package_metadata,
                                               get_winget_version, list_winget_sources, search_winget_packages)
 from labguard_server.exam_management import cancel_exam, create_exam, exam_out, list_exams
+from labguard_server.camera_monitoring import (camera_out, create_camera, delete_camera, list_cameras,
+    list_detections, update_camera)
 
 router = APIRouter(prefix="/api/v1")
 _login_failures: dict[str, list[float]] = {}
@@ -459,6 +464,27 @@ def list_devices(_admin=Depends(require_role("VIEWER")), db: Session = Depends(g
     return db.scalars(select(Device).order_by(Device.created_at)).all()
 
 
+@router.patch("/devices/{device_id}", response_model=DeviceOut)
+def rename_device(device_id: UUID, body: DeviceRename, request: Request,
+                  admin=Depends(require_role("LAB_ADMIN", csrf=True)), db: Session = Depends(get_db)):
+    device = db.get(Device, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Device not found"})
+    previous_name = device.assigned_name
+    device.assigned_name = body.assigned_name
+    audit(db, admin.id, "device.rename", "device", str(device.id),
+          {"previous_name": previous_name, "assigned_name": device.assigned_name})
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": "device_name_conflict", "message": "That PC name is already in use."}) from exc
+    db.refresh(device)
+    request.app.state.admin_events.publish({"type": "device.renamed", "device_id": str(device.id),
+        "assigned_name": device.assigned_name})
+    return device
+
+
 @router.get("/devices/{device_id}/software")
 def device_software(device_id: UUID, request: Request, search: str | None = Query(default=None, max_length=128),
                     publisher: str | None = Query(default=None, max_length=128),
@@ -791,6 +817,76 @@ async def remove_device(device_id: UUID, request: Request,
 @router.post("/rooms", response_model=RoomOut, status_code=201)
 def add_room(body: RoomCreate, admin=Depends(require_role("LAB_ADMIN", csrf=True)), db: Session = Depends(get_db)):
     return create_room(db, admin.id, body.model_dump())
+
+
+@router.get("/lab-cameras")
+def get_lab_cameras(room_id: UUID | None = None, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    return list_cameras(db, room_id)
+
+
+@router.get("/lab-cameras/{camera_id}/frame")
+def get_lab_camera_frame(camera_id: UUID, request: Request,
+                         _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    camera = db.get(LabCamera, camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Camera not found"})
+    frame = request.app.state.camera_frames.get(camera_id)
+    if frame is None:
+        raise HTTPException(status_code=404, detail={"code": "camera_frame_unavailable", "message": "No recent camera frame is available."})
+    return Response(content=frame[1], media_type="image/jpeg", headers={"Cache-Control": "no-store, private"})
+
+
+@router.post("/rooms/{room_id}/cameras", status_code=201)
+def post_lab_camera(room_id: UUID, body: LabCameraCreate, request: Request,
+                    admin=Depends(require_role("LAB_ADMIN", csrf=True)), db: Session = Depends(get_db)):
+    camera = create_camera(db, request.app, room_id, body.name, body.stream_uri)
+    audit(db, admin.id, "lab_camera.create", "lab_camera", str(camera["id"]),
+          {"room_id": str(room_id), "name": camera["name"]})
+    db.commit()
+    request.app.state.admin_events.publish({"type": "camera.updated", "camera_id": str(camera["id"]),
+        "room_id": str(room_id)})
+    return camera
+
+
+@router.patch("/lab-cameras/{camera_id}")
+def patch_lab_camera(camera_id: UUID, body: LabCameraPatch, request: Request,
+                     admin=Depends(require_role("LAB_ADMIN", csrf=True)), db: Session = Depends(get_db)):
+    camera = db.get(LabCamera, camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Camera not found"})
+    changes = body.model_dump(exclude_unset=True)
+    if not changes or all(value is None for value in changes.values()):
+        raise HTTPException(status_code=422, detail={"code": "empty_update", "message": "Provide a camera change."})
+    result = update_camera(db, request.app, camera, changes)
+    audit(db, admin.id, "lab_camera.update", "lab_camera", str(camera_id),
+          {key: value for key, value in changes.items() if key != "stream_uri"})
+    db.commit()
+    request.app.state.admin_events.publish({"type": "camera.updated", "camera_id": str(camera_id),
+        "room_id": str(camera.room_id)})
+    return result
+
+
+@router.delete("/lab-cameras/{camera_id}", status_code=204)
+def remove_lab_camera(camera_id: UUID, request: Request, admin=Depends(require_role("LAB_ADMIN", csrf=True)), db: Session = Depends(get_db)):
+    camera = db.get(LabCamera, camera_id)
+    if camera is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Camera not found"})
+    room_id = camera.room_id
+    audit(db, admin.id, "lab_camera.delete", "lab_camera", str(camera_id),
+          {"room_id": str(camera.room_id), "name": camera.name})
+    request.app.state.camera_frames.pop(camera_id, None)
+    delete_camera(db, camera)
+    db.commit()
+    request.app.state.admin_events.publish({"type": "camera.updated", "camera_id": str(camera_id),
+        "room_id": str(room_id)})
+    return Response(status_code=204)
+
+
+@router.get("/lab-camera-detections")
+def get_lab_camera_detections(room_id: UUID | None = None, camera_id: UUID | None = None,
+                              limit: int = Query(default=100, ge=1, le=500),
+                              _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    return list_detections(db, room_id, camera_id, limit)
 
 
 @router.get("/rooms", response_model=list[RoomOut])

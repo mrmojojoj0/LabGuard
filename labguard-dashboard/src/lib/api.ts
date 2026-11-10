@@ -1,6 +1,7 @@
 import type { ApiErrorShape } from "./types";
 
 const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+export const apiBaseUrl = baseUrl;
 let csrfToken: string | null = sessionStorage.getItem("labguard_csrf");
 export const setCsrfToken = (token: string | null) => {
   csrfToken = token;

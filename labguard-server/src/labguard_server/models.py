@@ -306,6 +306,7 @@ class SoftwareJob(Base):
     error_message: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -341,6 +342,34 @@ class Room(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     positions: Mapped[list["DevicePosition"]] = relationship(back_populates="room", cascade="all, delete-orphan")
+
+
+class LabCamera(Base):
+    __tablename__ = "lab_cameras"
+    __table_args__ = (Index("ix_lab_cameras_room_enabled", "room_id", "enabled"),)
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    room_id: Mapped[UUID] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    stream_uri_encrypted: Mapped[str] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    state: Mapped[str] = mapped_column(String(24), default="WAITING")
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    last_frame_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class LabCameraDetection(Base):
+    __tablename__ = "lab_camera_detections"
+    __table_args__ = (Index("ix_lab_camera_detections_room_time", "room_id", "occurred_at"),
+                      Index("ix_lab_camera_detections_camera_time", "camera_id", "occurred_at"))
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    camera_id: Mapped[UUID] = mapped_column(ForeignKey("lab_cameras.id", ondelete="CASCADE"), index=True)
+    room_id: Mapped[UUID] = mapped_column(ForeignKey("rooms.id", ondelete="CASCADE"), index=True)
+    label: Mapped[str] = mapped_column(String(40), index=True)
+    count: Mapped[int] = mapped_column(Integer, default=1)
+    confidence: Mapped[float] = mapped_column(Float)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
 
 
 class DevicePosition(Base):
