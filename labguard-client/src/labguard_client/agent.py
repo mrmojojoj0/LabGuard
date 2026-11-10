@@ -29,6 +29,7 @@ from labguard_client.software_management import (PackageManagerUnavailable, Soft
 from labguard_client.rdp_access import cleanup_expired_rdp_access, prepare_rdp_access
 from labguard_client.process_control import MAX_PROCESSES, list_processes, terminate_process
 from labguard_client.peripherals import collect_peripherals
+from labguard_client.screenshot_capture import capture_screenshot
 from labguard_client.network_events import WfpEventReader
 
 
@@ -121,7 +122,8 @@ class AgentClient:
     async def _read_session_acks(self, ws: ClientConnection, pending: dict[str, asyncio.Future],
                                  inventory_requests: asyncio.Queue, job_offers: asyncio.Queue | None = None,
                                  rdp_requests: asyncio.Queue | None = None,
-                                 process_requests: asyncio.Queue | None = None):
+                                 process_requests: asyncio.Queue | None = None,
+                                 screenshot_requests: asyncio.Queue | None = None):
         while True:
             message = json.loads(await ws.recv())
             if message.get("type") == "server.software_job.offer":
@@ -165,6 +167,18 @@ class AgentClient:
                 except asyncio.QueueFull:
                     logging.getLogger("labguard_client").warning("Process request queue is full")
                 continue
+            if message.get("type") == "server.screenshot.request":
+                if (message.get("protocol") != "labguard.agent"
+                        or message.get("schema_version") != 1
+                        or message.get("device_id") != self.identity.device_id
+                        or screenshot_requests is None):
+                    logging.getLogger("labguard_client").warning("Rejected screenshot request envelope")
+                    continue
+                try:
+                    screenshot_requests.put_nowait(message.get("payload"))
+                except asyncio.QueueFull:
+                    logging.getLogger("labguard_client").warning("Screenshot request queue is full")
+                continue
             if message.get("type") != "server.ack":
                 continue
             event_id = message.get("payload", {}).get("event_id")
@@ -201,6 +215,7 @@ class AgentClient:
         job_offers: asyncio.Queue[dict] = asyncio.Queue(maxsize=8)
         rdp_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=4)
         process_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=4)
+        screenshot_requests: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
 
         async def heartbeat_loop():
             while not await self._wait_or_stop(stop, self.heartbeat_interval):
@@ -292,6 +307,11 @@ class AgentClient:
                 except Exception as exc:
                     logger.exception("Process request failed (%s)", type(exc).__name__)
 
+        async def screenshot_request_loop():
+            while not stop.is_set():
+                payload = await screenshot_requests.get()
+                await self._run_screenshot_request(payload, ws, pending, send_lock)
+
         async def peripheral_snapshot_loop():
             last_signature = None
             last_sent_at = 0.0
@@ -319,12 +339,13 @@ class AgentClient:
                 if await self._wait_or_stop(stop, 5):
                     break
 
-        tasks = [asyncio.create_task(self._read_session_acks(ws, pending, inventory_requests, job_offers, rdp_requests, process_requests)),
+        tasks = [asyncio.create_task(self._read_session_acks(ws, pending, inventory_requests, job_offers, rdp_requests, process_requests, screenshot_requests)),
                  asyncio.create_task(heartbeat_loop()), asyncio.create_task(telemetry_loop()),
                  asyncio.create_task(software_inventory_loop()),
                  asyncio.create_task(software_job_loop()), asyncio.create_task(rdp_access_loop()),
                  asyncio.create_task(process_request_loop()), asyncio.create_task(stop.wait()),
                  asyncio.create_task(peripheral_snapshot_loop()), asyncio.create_task(wfp_event_loop())]
+        tasks.append(asyncio.create_task(screenshot_request_loop()))
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             if tasks[7] in done:
@@ -691,6 +712,46 @@ class AgentClient:
                     break
         except Exception as exc:
             logger.warning("Could not report process result (%s)", type(exc).__name__)
+
+    async def _run_screenshot_request(self, payload: dict, ws, pending, send_lock):
+        logger = logging.getLogger("labguard_client")
+        capture_id = None
+        try:
+            if not isinstance(payload, dict) or set(payload) != {"capture_id", "expires_at"}:
+                raise ValueError("invalid_request")
+            capture_id = UUID(payload["capture_id"])
+            expires = datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00"))
+            if expires.tzinfo is None or expires.astimezone(UTC) <= datetime.now(UTC):
+                raise ValueError("request_expired")
+            if expires.astimezone(UTC) > datetime.now(UTC) + timedelta(minutes=3):
+                raise ValueError("request_expiry_invalid")
+            content = await asyncio.to_thread(capture_screenshot, capture_id)
+            chunk_size = 32 * 1024
+            chunks = [content[index:index + chunk_size] for index in range(0, len(content), chunk_size)]
+            for index, chunk in enumerate(chunks):
+                result = await self._send_session_event(ws, "client.screenshot.chunk", {
+                    "capture_id": str(capture_id), "chunk_index": index,
+                    "chunk_count": len(chunks), "data": base64.b64encode(chunk).decode("ascii")},
+                    pending, send_lock)
+                if not result.get("accepted"):
+                    logger.warning("Screenshot chunk rejected (%s)", result.get("reason", "unknown"))
+                    return
+            logger.info("Screenshot capture %s uploaded", capture_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            candidate = str(exc)
+            code = candidate if re.fullmatch(r"[a-z0-9_:-]{1,64}", candidate) else "capture_internal_error"
+            # Keep the dashboard error code generic, while retaining a traceback in
+            # the protected local service log so unexpected Windows API failures
+            # can be diagnosed without exposing exception text to the UI.
+            logger.exception("Screenshot capture failed (%s; exception=%s)", code, type(exc).__name__)
+            if capture_id is not None:
+                try:
+                    await self._send_session_event(ws, "client.screenshot.failed",
+                        {"capture_id": str(capture_id), "error_code": code}, pending, send_lock)
+                except Exception:
+                    pass
 
     async def _rdp_lease_cleanup_loop(self, stop: asyncio.Event):
         logger = logging.getLogger("labguard_client")

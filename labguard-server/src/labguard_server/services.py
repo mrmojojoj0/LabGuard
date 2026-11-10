@@ -270,20 +270,33 @@ def update_room(db: Session, admin_id: UUID, room: Room, changes: dict):
 
 
 def save_layout(db: Session, admin_id: UUID, room: Room, layout: RoomLayout):
+    ids = [item.device_id for item in layout.assignments]
+    if len(set(ids)) != len(ids):
+        raise HTTPException(status_code=422, detail={"code": "duplicate_device_assignment", "message": "A device may appear only once in a room layout"})
+    if ids:
+        # Serialize layouts that try to assign the same device concurrently.
+        db.scalars(select(Device).where(Device.id.in_(ids)).order_by(Device.id).with_for_update()).all()
     for item in layout.assignments:
         if item.row >= layout.rows or item.column >= layout.columns:
             raise HTTPException(status_code=422, detail={"code": "cell_out_of_bounds", "message": "Assignment is outside the new grid dimensions"})
         device = db.get(Device, item.device_id)
         if device is None or device.enrollment_state != "APPROVED" or not device.enabled:
             raise HTTPException(status_code=422, detail={"code": "device_unavailable", "message": "Only approved enabled devices may be positioned"})
+    if ids:
+        other_room = db.execute(
+            select(DevicePosition, Room.name)
+            .join(Room, Room.id == DevicePosition.room_id)
+            .where(DevicePosition.device_id.in_(ids), DevicePosition.room_id != room.id)
+            .limit(1)
+        ).first()
+        if other_room:
+            raise HTTPException(status_code=409, detail={
+                "code": "device_already_assigned",
+                "message": f"Device is already assigned to {other_room[1]}. Unassign it there before assigning it to another lab.",
+            })
     room.grid_rows, room.grid_columns = layout.rows, layout.columns
-    # A device may move between rooms; replacement is performed as one transaction.
-    ids = [item.device_id for item in layout.assignments]
     for old in db.scalars(select(DevicePosition).where(DevicePosition.room_id == room.id)).all():
         db.delete(old)
-    if ids:
-        for old in db.scalars(select(DevicePosition).where(DevicePosition.device_id.in_(ids))).all():
-            db.delete(old)
     db.flush()
     for item in layout.assignments:
         db.add(DevicePosition(device_id=item.device_id, room_id=room.id, row_index=item.row, column_index=item.column))

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+from pathlib import Path
 from urllib.parse import urlsplit
 
 
@@ -27,6 +28,7 @@ class Settings:
     chocolatey_source_url: str | None = None
     software_job_max_runtime_seconds: int = 1800
     ipinfo_token: str | None = None
+    screenshot_storage_dir: str = "data/screenshots"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -53,6 +55,8 @@ class Settings:
             chocolatey_source_url=os.getenv("CHOCOLATEY_SOURCE_URL") or None,
             software_job_max_runtime_seconds=int(os.getenv("SOFTWARE_JOB_MAX_RUNTIME_SECONDS", "1800")),
             ipinfo_token=os.getenv("IPINFO_TOKEN") or None,
+            screenshot_storage_dir=os.getenv("SCREENSHOT_STORAGE_DIR",
+                str(Path(__file__).resolve().parents[2] / "data" / "screenshots")),
         )
 
     def validate(self) -> None:

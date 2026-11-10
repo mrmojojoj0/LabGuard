@@ -32,6 +32,18 @@ export interface RdpAccessRequest {
   expires_at: string;
   access_expires_at: string;
 }
+export interface ScreenshotCapture {
+  id: string;
+  device_id: string;
+  device_name: string;
+  status: "PENDING" | "READY" | "FAILED" | "EXPIRED";
+  error_code: string | null;
+  image_size_bytes: number | null;
+  created_at: string;
+  captured_at: string | null;
+  expires_at: string;
+  sha256: string | null;
+}
 export interface DeviceProcessEntry {
   pid: number;
   name: string;

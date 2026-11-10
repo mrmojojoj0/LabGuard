@@ -29,8 +29,6 @@ def upgrade():
         sa.Column("source_port", sa.Integer(), nullable=True),
         sa.Column("destination_ip", sa.String(45), nullable=False),
         sa.Column("destination_port", sa.Integer(), nullable=True),
-        sa.Column("remote_ip", sa.String(45), nullable=False),
-        sa.Column("remote_is_public", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("process_id", sa.BigInteger(), nullable=True),
         sa.Column("process_path", sa.String(1024), nullable=True),
         sa.ForeignKeyConstraint(["device_id"], ["devices.id"], ondelete="CASCADE"),
@@ -42,7 +40,6 @@ def upgrade():
     op.create_index("ix_device_wfp_events_occurred_at", "device_wfp_events", ["occurred_at"])
     op.create_index("ix_wfp_device_occurred", "device_wfp_events", ["device_id", "occurred_at"])
     op.create_index("ix_wfp_occurred", "device_wfp_events", ["occurred_at"])
-    op.create_index("ix_wfp_public_occurred", "device_wfp_events", ["remote_is_public", "occurred_at"])
     op.create_table(
         "device_wfp_states",
         sa.Column("device_id", sa.Uuid(), nullable=False),

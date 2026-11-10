@@ -6,7 +6,7 @@ import {
   type FormEvent,
 } from "react";
 import { DragDropProvider, useDraggable, useDroppable } from "@dnd-kit/react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDown,
   Check,
@@ -171,10 +171,14 @@ function FloorCell({
 function UnassignedRail({
   devices,
   editable,
+  loadingAssignments,
+  assignmentsAvailable,
   onInspect,
 }: {
   devices: DeviceWithStatus[];
   editable: boolean;
+  loadingAssignments: boolean;
+  assignmentsAvailable: boolean;
   onInspect: (device: Device) => void;
 }) {
   const drop = useDroppable({ id: "unassigned", disabled: !editable });
@@ -197,7 +201,11 @@ function UnassignedRail({
         </span>
       </div>
       <div className="flex flex-col gap-2 overflow-auto p-2.5 max-[1120px]:grid max-[1120px]:grid-cols-[repeat(auto-fit,minmax(220px,1fr))] max-[680px]:grid-cols-1">
-        {devices.length ? (
+        {loadingAssignments ? (
+          <div className="p-6 text-center text-[8px] text-[var(--color-muted)]">Checking assignments in other labs…</div>
+        ) : !assignmentsAvailable ? (
+          <div className="p-6 text-center text-[8px] text-amber-700">Could not confirm other lab assignments. Refresh the page before assigning devices.</div>
+        ) : devices.length ? (
           devices.map(({ device, status }) => (
             <DeviceCard
               key={device.id}
@@ -403,6 +411,14 @@ export function RoomsPage() {
   const qc = useQueryClient();
   const rooms = useQuery({ queryKey: ["rooms"], queryFn: roomsApi.list });
   const devices = useQuery({ queryKey: ["devices"], queryFn: devicesApi.list });
+  const roomLayouts = useQueries({
+    queries: (rooms.data ?? []).map((room) => ({
+      queryKey: ["room-layout", room.id],
+      queryFn: () => roomsApi.layout(room.id),
+    })),
+  });
+  const roomAssignmentsLoading = rooms.isLoading || roomLayouts.some((query) => query.isLoading);
+  const roomAssignmentsAvailable = rooms.isSuccess && roomLayouts.every((query) => Boolean(query.data));
   const statusIds = devices.data?.map((device) => device.id) ?? [];
   const statuses = useQuery({
     queryKey: ["statuses", statusIds],
@@ -500,6 +516,7 @@ export function RoomsPage() {
       setDraft(structuredClone(result));
       setLoadedRoomId(result.room.id);
       qc.setQueryData(["room-layout", result.room.id], result);
+      void qc.invalidateQueries({ queryKey: ["room-layout"] });
       void qc.invalidateQueries({ queryKey: ["rooms"] });
       setNotice("Floor plan saved.");
       toast("Floor plan saved.");
@@ -525,11 +542,14 @@ export function RoomsPage() {
     draft?.assignments.map((item) => item.device_id) ??
       EMPTY_ASSIGNMENTS.map((item) => item.device_id),
   );
+  const assignedElsewhereIds = new Set(roomLayouts.flatMap((query) =>
+    query.data?.room.id !== selectedRoomId ? query.data?.assignments.map((item) => item.device_id) ?? [] : [],
+  ));
   const eligibleDevices = (devices.data ?? []).filter(
     (device) => device.enabled && device.enrollment_state === "APPROVED",
   );
   const unassigned = eligibleDevices
-    .filter((device) => !assignedIds.has(device.id))
+    .filter((device) => roomAssignmentsAvailable && !assignedIds.has(device.id) && !assignedElsewhereIds.has(device.id))
     .map((device) => ({ device, status: statusById.get(device.id) ?? null }));
   const pending = (devices.data ?? []).filter(
     (device) => device.enrollment_state === "PENDING",
@@ -1135,6 +1155,8 @@ export function RoomsPage() {
                   <UnassignedRail
                     devices={unassigned}
                     editable={editable}
+                    loadingAssignments={roomAssignmentsLoading}
+                    assignmentsAvailable={roomAssignmentsAvailable}
                     onInspect={setSelectedDevice}
                   />
                 </div>

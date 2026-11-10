@@ -1,0 +1,101 @@
+import { useMemo, useState, type FormEvent } from "react";
+import { CalendarClock, Download, ShieldAlert } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Button, Empty, PageHeader, Panel, PanelTitle, QueryError, Skeleton, StatusBadge } from "../../components/ui";
+import { useAuth } from "../auth/AuthProvider";
+import { devicesApi } from "../devices/api";
+import { roomsApi } from "../rooms/api";
+import { examsApi, type ExamPolicy } from "./api";
+
+const emptyPolicy: ExamPolicy = { network_mode: "MONITOR", allowed_networks: [], restricted_apps: [],
+  restrict_browsers: false, restricted_browsers: [], block_usb_storage: false, screenshot_on_violation: false };
+const localInputDate = (value: Date) => new Date(value.getTime() - value.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+
+export function ExamsPage() {
+  const { admin } = useAuth();
+  const queryClient = useQueryClient();
+  const exams = useQuery({ queryKey: ["exams"], queryFn: examsApi.list, refetchInterval: 5_000 });
+  const rooms = useQuery({ queryKey: ["rooms"], queryFn: roomsApi.list });
+  const devices = useQuery({ queryKey: ["devices"], queryFn: devicesApi.list });
+  const [roomId, setRoomId] = useState("");
+  const [title, setTitle] = useState("");
+  const [startsAt, setStartsAt] = useState(() => localInputDate(new Date(Date.now() + 60_000)));
+  const [endsAt, setEndsAt] = useState(() => localInputDate(new Date(Date.now() + 61 * 60_000)));
+  const [policy, setPolicy] = useState<ExamPolicy>(emptyPolicy);
+  const [appsText, setAppsText] = useState("");
+  const [networksText, setNetworksText] = useState("");
+  const [reportId, setReportId] = useState<string | null>(null);
+  const selectedRoom = rooms.data?.find((room) => room.id === roomId);
+  const layout = useQuery({ queryKey: ["room-layout", roomId], queryFn: () => roomsApi.layout(roomId), enabled: Boolean(roomId) });
+  const assignedIds = useMemo(() => layout.data?.assignments.map((item) => item.device_id) ?? [], [layout.data]);
+  const targetIds = assignedIds;
+  const statuses = useQuery({ queryKey: ["exam-statuses", targetIds.join(",")],
+    queryFn: async () => {
+      const targets = (devices.data ?? []).filter((device) => targetIds.includes(device.id));
+      const values = await devicesApi.statuses(targets);
+      return Object.fromEntries(targets.map((device, index) => [device.id, values[index]]));
+    },
+    enabled: targetIds.length > 0, refetchInterval: 5_000 });
+  const report = useQuery({ queryKey: ["exam-report", reportId], queryFn: () => examsApi.report(reportId!), enabled: Boolean(reportId) });
+  const create = useMutation({ mutationFn: examsApi.create, onSuccess: () => {
+    setTitle(""); void queryClient.invalidateQueries({ queryKey: ["exams"] });
+  } });
+  const cancel = useMutation({ mutationFn: examsApi.cancel, onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["exams"] }) });
+  const canManage = admin?.role === "LAB_ADMIN" || admin?.role === "SUPER_ADMIN";
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!selectedRoom || !targetIds.length) return;
+    const finalPolicy = { ...policy,
+      allowed_networks: networksText.split(/[\s,;]+/).filter(Boolean),
+      restricted_apps: appsText.split(/[\s,;]+/).filter(Boolean) };
+    create.mutate({ title, room_id: selectedRoom.id, device_ids: targetIds,
+      starts_at: new Date(startsAt).toISOString(), ends_at: new Date(endsAt).toISOString(), policy: finalPolicy });
+  };
+
+  return <div className="mx-auto max-w-6xl p-4 md:p-6">
+    <PageHeader eyebrow="EXAM INTEGRITY" title="Exam management"
+      description="Schedule exams against existing lab layouts, review agent health, and export an auditable report." />
+    {create.error && <QueryError error={create.error} />}{exams.error && <QueryError error={exams.error} />}
+    {canManage && <Panel className="mb-5"><PanelTitle>Create a scheduled exam</PanelTitle>
+      <form onSubmit={submit} className="mt-4 grid gap-3 md:grid-cols-2">
+        <label className="text-[10px] font-semibold">Exam name<input required maxLength={160} value={title} onChange={(e) => setTitle(e.target.value)} className="mt-1 block h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2" /></label>
+        <label className="text-[10px] font-semibold">Lab<select required value={roomId} onChange={(e) => setRoomId(e.target.value)} className="mt-1 block h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2"><option value="">Select a lab</option>{rooms.data?.map((room) => <option value={room.id} key={room.id}>{room.name}</option>)}</select></label>
+        <label className="text-[10px] font-semibold">Starts (local time)<input type="datetime-local" required value={startsAt} onChange={(e) => setStartsAt(e.target.value)} className="mt-1 block h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2" /></label>
+        <label className="text-[10px] font-semibold">Ends (local time)<input type="datetime-local" required value={endsAt} onChange={(e) => setEndsAt(e.target.value)} className="mt-1 block h-9 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2" /></label>
+        <div className="text-[10px] text-[var(--color-muted)] md:col-span-2">{layout.isLoading ? "Loading lab positions…" : "All PCs assigned to this lab are included."}</div>
+        <div className="grid gap-3 rounded-lg border border-[var(--color-border)] p-3 md:col-span-2 md:grid-cols-2">
+          <label className="flex items-center gap-2 text-[10px]"><input type="checkbox" checked={policy.network_mode === "ALLOW_LIST"} onChange={(e) => setPolicy({ ...policy, network_mode: e.target.checked ? "ALLOW_LIST" : "MONITOR" })} />Configure network allow-list policy</label>
+          <label className="flex items-center gap-2 text-[10px]"><input type="checkbox" checked={policy.block_usb_storage} onChange={(e) => setPolicy({ ...policy, block_usb_storage: e.target.checked })} />Request USB storage restriction</label>
+          <label className="flex items-center gap-2 text-[10px]"><input type="checkbox" checked={policy.restrict_browsers} onChange={(e) => setPolicy({ ...policy, restrict_browsers: e.target.checked })} />Restrict common browsers (Edge, Chrome, Firefox)</label>
+          <label className="flex items-center gap-2 text-[10px]"><input type="checkbox" checked={policy.screenshot_on_violation} onChange={(e) => setPolicy({ ...policy, screenshot_on_violation: e.target.checked })} />Request screenshot when a violation is detected</label>
+          <label className="text-[10px]">Allowed IP/CIDR ranges<textarea disabled={policy.network_mode !== "ALLOW_LIST"} value={networksText} onChange={(e) => setNetworksText(e.target.value)} placeholder="10.0.0.0/8, 2001:db8::/32" className="mt-1 block min-h-16 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2" /></label>
+          <label className="text-[10px] md:col-span-2">Restricted executable names<textarea value={appsText} onChange={(e) => setAppsText(e.target.value)} placeholder="game.exe, discord.exe" className="mt-1 block min-h-16 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2" /></label>
+        </div>
+        <div className="rounded-md bg-amber-50 p-2 text-[9px] text-amber-900 dark:bg-amber-950/30 dark:text-amber-200 md:col-span-2">Policies are recorded with the exam. Endpoint enforcement and automatic violation screenshots require a compatible updated agent; this dashboard reports that distinction and does not claim policy application.</div>
+        <Button className="w-fit" disabled={!title.trim() || !roomId || !targetIds.length || create.isPending}>Schedule exam</Button>
+      </form>
+    </Panel>}
+
+    <Panel className="mb-5"><PanelTitle aside={<span className="text-[9px] text-[var(--color-muted)]">Refreshes every 5 seconds</span>}>Scheduled exams and live PC status</PanelTitle>
+      {exams.isLoading ? <Skeleton rows={3} /> : exams.data?.length ? <div className="mt-3 space-y-3">{exams.data.map((exam) => <ExamCard key={exam.id} exam={exam} onReport={() => setReportId(exam.id)} onCancel={() => cancel.mutate(exam.id)} canManage={canManage} />)}</div> : <Empty title="No exams yet" detail="Create an exam to schedule a lab session." />}
+      {cancel.error && <QueryError error={cancel.error} />}
+    </Panel>
+
+    {selectedRoom && <Panel className="mb-5"><PanelTitle>{selectedRoom.name} · assigned PCs</PanelTitle>
+      {!targetIds.length ? <Empty title="No PCs assigned" detail="Assign approved devices in Rooms & Labs first." /> : <div className="mt-3 grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.min(selectedRoom.grid_columns, 10)}, minmax(0, 1fr))` }}>{targetIds.map((id) => { const device = devices.data?.find((item) => item.id === id); const status = statuses.data?.[id]; const position = layout.data?.assignments.find((item) => item.device_id === id); return <div key={id} style={position ? { gridColumn: position.column + 1, gridRow: position.row + 1 } : undefined} className="min-h-16 rounded-md border border-[var(--color-border)] p-2 text-[9px]"><strong className="block truncate">{device?.assigned_name || device?.hostname || id}</strong><StatusBadge value={status?.agent_state ?? "UNKNOWN"} /></div>; })}</div>}
+    </Panel>}
+
+    {reportId && <Panel className="print:border-0 print:shadow-none"><PanelTitle aside={<div className="flex gap-2 print:hidden"><Button onClick={() => window.print()}><Download size={14} /> Export / Print PDF</Button><Button onClick={() => setReportId(null)}>Close</Button></div>}>Exam report</PanelTitle>
+      {report.isLoading ? <Skeleton /> : report.error ? <QueryError error={report.error} /> : report.data && <div className="mt-3 space-y-3">
+        <div><h2 className="m-0 text-base font-bold">{report.data.exam.title}</h2><p className="text-[10px]">{report.data.exam.room_name} · {new Date(report.data.exam.starts_at).toLocaleString()} – {new Date(report.data.exam.ends_at).toLocaleString()} · {report.data.exam.status}</p></div>
+        <h3 className="text-xs font-bold">PC integrity status</h3><div className="grid gap-2 md:grid-cols-2">{report.data.devices.map((device) => <div key={device.device_id} className="rounded-md border border-[var(--color-border)] p-2 text-[10px]"><strong>{device.device_name}</strong> · {device.agent_state} · {device.violation_count} alerts<br/><small>Last heartbeat: {device.last_heartbeat_at ? new Date(device.last_heartbeat_at).toLocaleString() : "Never"}</small></div>)}</div>
+        <h3 className="text-xs font-bold">Integrity alerts ({report.data.violations.length})</h3>{report.data.violations.map((item) => { const captureId = item.details.screenshot_capture_id; const detail = item.details.remote_ip ?? item.details.name; return <div key={item.id} className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] py-2 text-[10px]"><ShieldAlert size={14} />{new Date(item.occurred_at).toLocaleString()} · {item.kind} · {item.severity} · {report.data!.devices.find((d) => d.device_id === item.device_id)?.device_name ?? item.device_id}{typeof detail === "string" && ` · ${detail}`}{typeof captureId === "string" && <> · <a href="/screenshots" className="underline">Evidence requested ({captureId.slice(0, 8)})</a></>}</div>; })}
+        <p className="text-[8px] text-[var(--color-muted)]">Generated {new Date(report.data.generated_at).toLocaleString()}. Use the browser print dialog to save as PDF.</p>
+      </div>}
+    </Panel>}
+  </div>;
+}
+
+function ExamCard({ exam, onReport, onCancel, canManage }: { exam: Awaited<ReturnType<typeof examsApi.list>>[number]; onReport: () => void; onCancel: () => void; canManage: boolean }) {
+  return <article className="rounded-lg border border-[var(--color-border)] p-3"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><CalendarClock size={15} /><strong className="text-xs">{exam.title}</strong><StatusBadge value={exam.status} /></div><div className="flex gap-2"><Button onClick={onReport}>Report ({exam.violations})</Button>{canManage && ["SCHEDULED", "ACTIVE"].includes(exam.status) && <Button className="text-red-600" onClick={onCancel}>Cancel</Button>}</div></div><p className="mb-1 text-[9px] text-[var(--color-muted)]">{exam.room_name} · {exam.device_ids.length} PCs · {new Date(exam.starts_at).toLocaleString()} – {new Date(exam.ends_at).toLocaleString()}</p><p className="m-0 text-[8px] text-amber-700">Desired policy saved · agent enforcement status not yet reported</p></article>;
+}

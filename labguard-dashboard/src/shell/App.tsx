@@ -10,6 +10,7 @@ import {
 } from "react-router-dom";
 import {
   Activity,
+  Camera,
   ChevronDown,
   Command,
   Cpu,
@@ -25,6 +26,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Search,
+  ShieldCheck,
   Settings,
   Sun,
   Usb,
@@ -43,7 +45,9 @@ import { SoftwarePage } from "../features/software/SoftwarePage";
 import { SoftwareDeploymentPage } from "../features/software/SoftwareDeploymentPage";
 import { ProcessMonitoringPage } from "../features/devices/ProcessMonitoringPage";
 import { NetworkMonitoringPage } from "../features/network/NetworkMonitoringPage";
-import { ComingSoon } from "../components/ui";
+import { FleetRemoteAccessPage, UsbMonitoringPage } from "../features/devices/FleetMonitoringPages";
+import { ScreenshotMonitoringPage } from "../features/devices/ScreenshotMonitoringPage";
+import { ExamsPage } from "../features/exams/ExamsPage";
 import type { Device } from "../lib/types";
 
 type Nav = {
@@ -57,6 +61,7 @@ const groups: { title: string; items: Nav[] }[] = [
     items: [
       { label: "Overview", path: "/", icon: Gauge },
       { label: "Rooms & Labs", path: "/rooms", icon: Grid2X2 },
+      { label: "Exams", path: "/exams", icon: ShieldCheck },
       { label: "Devices", path: "/devices", icon: Laptop },
       {
         label: "Enrollment Requests",
@@ -74,6 +79,7 @@ const groups: { title: string; items: Nav[] }[] = [
       { label: "Network Monitoring", path: "/network", icon: Network },
       { label: "USB Monitoring", path: "/usb", icon: Usb },
       { label: "Remote Access", path: "/remote-access", icon: Headphones },
+      { label: "Screenshots", path: "/screenshots", icon: Camera },
     ],
   },
   {
@@ -88,22 +94,6 @@ function Protected({ children }: { children: React.ReactNode }) {
   const { admin, ready } = useAuth();
   if (!ready) return null;
   return admin ? <>{children}</> : <Navigate to="/login" replace />;
-}
-function Placeholder({ title }: { title: string }) {
-  return (
-    <>
-      <div className="text-[9px] font-bold tracking-[1.4px] text-[var(--color-muted)]">
-        MONITORING
-      </div>
-      <h1 className="my-1 text-[26px] font-bold tracking-tight text-[var(--color-foreground)]">
-        {title}
-      </h1>
-      <ComingSoon
-        title={`${title} is planned`}
-        description="The current LabGuard server API does not provide this capability. This page will be enabled when backend support is available."
-      />
-    </>
-  );
 }
 function Shell({ children }: { children: ReactNode }) {
   const { admin, logout } = useAuth();
@@ -208,6 +198,7 @@ function Shell({ children }: { children: ReactNode }) {
                       "/network",
                       "/usb",
                       "/remote-access",
+                      "/screenshots",
                     ].includes(item.path) && (
                       <i className="h-1 w-1 rounded-full bg-slate-600" />
                     )}
@@ -360,11 +351,20 @@ function AdminEventBridge() {
     stream.addEventListener("device.connection", refresh);
     stream.addEventListener("device.telemetry", refreshTelemetry);
     stream.addEventListener("device.peripherals", refreshPeripherals);
+    stream.addEventListener("device.screenshot", () => {
+      void queryClient.invalidateQueries({ queryKey: ["screenshots"] });
+    });
     stream.addEventListener("device.network", () => {
       void queryClient.invalidateQueries({ queryKey: ["network-events"] });
     });
     stream.addEventListener("software.inventory", refreshSoftware);
     stream.addEventListener("software.job", refreshSoftwareJobs);
+    const refreshExams = () => {
+      void queryClient.invalidateQueries({ queryKey: ["exams"] });
+      void queryClient.invalidateQueries({ queryKey: ["exam-report"] });
+    };
+    stream.addEventListener("exam.updated", refreshExams);
+    stream.addEventListener("exam.violation", refreshExams);
     const deviceDeleted = (event: MessageEvent<string>) => {
       const id = (JSON.parse(event.data) as { device_id: string }).device_id;
       queryClient.setQueryData<Device[]>(["devices"], (current) =>
@@ -400,6 +400,7 @@ function RoutedShell() {
           <Route path="/devices" element={<DevicesPage />} />
           <Route path="/devices/:id" element={<DeviceDetailPage />} />
           <Route path="/rooms" element={<RoomsPage />} />
+          <Route path="/exams" element={<ExamsPage />} />
           <Route path="/enrollment" element={<EnrollmentPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/audit" element={<AuditPage />} />
@@ -419,11 +420,12 @@ function RoutedShell() {
             path="/network"
             element={<NetworkMonitoringPage />}
           />
-          <Route path="/usb" element={<Placeholder title="USB Monitoring" />} />
+          <Route path="/usb" element={<UsbMonitoringPage />} />
           <Route
             path="/remote-access"
-            element={<Placeholder title="Remote Access" />}
+            element={<FleetRemoteAccessPage />}
           />
+          <Route path="/screenshots" element={<ScreenshotMonitoringPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Shell>

@@ -407,3 +407,62 @@ class DeviceProcessRequest(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ScreenshotCapture(Base):
+    __tablename__ = "screenshot_captures"
+    __table_args__ = (
+        CheckConstraint("status IN ('PENDING', 'READY', 'FAILED', 'EXPIRED')", name="ck_screenshot_captures_status"),
+        Index("ix_screenshot_captures_device_created", "device_id", "created_at"),
+        Index("ix_screenshot_captures_expires", "expires_at"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    requested_by: Mapped[UUID | None] = mapped_column(ForeignKey("administrators.id", ondelete="SET NULL"), index=True)
+    device_name: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    image_path: Mapped[str | None] = mapped_column(Text)
+    image_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    image_sha256: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    chunk_count: Mapped[int | None] = mapped_column(Integer)
+
+
+class Exam(Base):
+    __tablename__ = "exams"
+    __table_args__ = (
+        CheckConstraint("status IN ('SCHEDULED', 'ACTIVE', 'COMPLETED', 'CANCELLED')", name="ck_exams_status"),
+        CheckConstraint("ends_at > starts_at", name="ck_exams_time_range"),
+        Index("ix_exams_schedule", "status", "starts_at", "ends_at"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    room_id: Mapped[UUID] = mapped_column(ForeignKey("rooms.id", ondelete="RESTRICT"), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="SCHEDULED", index=True)
+    device_ids: Mapped[list] = mapped_column(JSON)
+    policy_json: Mapped[dict] = mapped_column(JSON)
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("administrators.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class ExamViolation(Base):
+    __tablename__ = "exam_violations"
+    __table_args__ = (
+        UniqueConstraint("exam_id", "event_key", name="uq_exam_violation_event"),
+        Index("ix_exam_violations_exam_time", "exam_id", "occurred_at"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    exam_id: Mapped[UUID] = mapped_column(ForeignKey("exams.id", ondelete="CASCADE"), index=True)
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    event_key: Mapped[str] = mapped_column(String(160))
+    kind: Mapped[str] = mapped_column(String(48), index=True)
+    severity: Mapped[str] = mapped_column(String(16), default="MEDIUM")
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)

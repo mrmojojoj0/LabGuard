@@ -5,18 +5,19 @@ import getpass
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from labguard_server.db import get_db
 from labguard_server.models import (AuditEvent, Device, DeviceAuthChallenge, DeviceCredential, DevicePosition,
                                     DeviceProcessRequest, DeviceStatus, DeviceStatusEvent, RdpAccessRequest, Room,
-                                    SoftwareCatalogPackage, SoftwareJob, now_utc)
+                                    SoftwareCatalogPackage, SoftwareJob, ScreenshotCapture, Exam, ExamViolation, now_utc)
 from labguard_server.schemas import (DeviceApproval, DeviceChallengeRequest, DeviceOut, DeviceTicketRequest, EnrollmentCodeOut, EnrollmentRequestIn,
                                      LayoutOut, LoginRequest, RoomCreate, RoomLayout, RoomOut, RoomPatch,
                                      RdpAccessRequestOut, SoftwareCatalogPackageCreate, SoftwareJobCreate,
                                      ProcessRequestCreate, ProcessRequestOut, WingetCatalogImport)
+from labguard_server.schemas import ExamCreate
 from labguard_server.security import csrf_protected, digest, require_role
 from labguard_server.services import (approve_device, audit, authenticate, create_enrollment_code, create_room,
                                       create_device_challenge, delete_device, issue_device_ticket, save_layout, submit_enrollment,
@@ -36,13 +37,68 @@ from labguard_server.software_jobs import (catalog_out, create_software_job, dis
 from labguard_server.process_management import (create_process_request, expire_process_request,
                                                 process_request_out)
 from labguard_server.websocket import send_process_request
+from labguard_server.websocket import send_screenshot_request
+from labguard_server.screenshot_service import (capture_out, create_capture, delete_capture,
+    expired_at, list_captures, REQUEST_TTL)
+from pathlib import Path as FilePath
 from labguard_server.winget_discovery import (WingetDiscoveryError, get_winget_package_metadata,
                                               get_winget_version, list_winget_sources, search_winget_packages)
+from labguard_server.exam_management import cancel_exam, create_exam, exam_out, list_exams
 
 router = APIRouter(prefix="/api/v1")
 _login_failures: dict[str, list[float]] = {}
 _enrollment_attempts: dict[str, list[float]] = {}
 _device_auth_attempts: dict[str, list[float]] = {}
+
+
+@router.get("/exams")
+def get_exams(_admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    return list_exams(db)
+
+
+@router.post("/exams", status_code=201)
+def post_exam(body: ExamCreate, request: Request, admin=Depends(require_role("LAB_ADMIN", csrf=True)),
+              db: Session = Depends(get_db)):
+    row = create_exam(db, admin.id, body)
+    result = exam_out(db, row)
+    request.app.state.admin_events.publish({"type": "exam.updated", "exam_id": str(row.id), "status": row.status})
+    return result
+
+
+@router.post("/exams/{exam_id}/cancel")
+def post_exam_cancel(exam_id: UUID, request: Request,
+                     admin=Depends(require_role("LAB_ADMIN", csrf=True)), db: Session = Depends(get_db)):
+    row = db.get(Exam, exam_id)
+    if row is None:
+        raise HTTPException(404, detail={"code": "not_found", "message": "Exam not found."})
+    cancel_exam(db, admin.id, row)
+    request.app.state.admin_events.publish({"type": "exam.updated", "exam_id": str(row.id), "status": row.status})
+    return exam_out(db, row)
+
+
+@router.get("/exams/{exam_id}/report")
+def get_exam_report(exam_id: UUID, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    exam = db.get(Exam, exam_id)
+    if exam is None:
+        raise HTTPException(404, detail={"code": "not_found", "message": "Exam not found."})
+    devices = []
+    for device_id_text in exam.device_ids:
+        device_id = UUID(device_id_text)
+        device, state = db.get(Device, device_id), db.get(DeviceStatus, device_id)
+        if device is None:
+            continue
+        violations = db.scalar(select(func.count(ExamViolation.id)).where(
+            ExamViolation.exam_id == exam.id, ExamViolation.device_id == device_id)) or 0
+        devices.append({"device_id": str(device_id), "device_name": device.assigned_name or device.hostname,
+            "agent_state": state.agent_state if state else "NEVER_CONNECTED",
+            "last_heartbeat_at": state.last_heartbeat_at if state else None,
+            "violation_count": violations})
+    alerts = db.scalars(select(ExamViolation).where(ExamViolation.exam_id == exam.id)
+        .order_by(ExamViolation.occurred_at.desc()).limit(1000)).all()
+    return {"exam": exam_out(db, exam), "devices": devices,
+        "violations": [{"id": str(item.id), "device_id": str(item.device_id), "kind": item.kind,
+            "severity": item.severity, "occurred_at": item.occurred_at, "details": item.details} for item in alerts],
+        "generated_at": now_utc()}
 
 
 @router.post("/auth/login")
@@ -247,6 +303,60 @@ def get_device_process_request(device_id: UUID, request_id: UUID,
     if process_request is None:
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Process request not found"})
     return process_request_out(expire_process_request(db, process_request))
+
+
+@router.post("/devices/{device_id}/screenshots", status_code=202)
+async def request_device_screenshot(device_id: UUID, request: Request,
+                                    admin=Depends(require_role("LAB_ADMIN", csrf=True)),
+                                    db: Session = Depends(get_db)):
+    if request.app.state.active_devices.get(device_id) is None:
+        raise HTTPException(status_code=409, detail={"code": "device_offline", "message": "The device must be online to capture a screenshot"})
+    capture = create_capture(db, device_id, admin.id)
+    sent = await send_screenshot_request(request.app, device_id, {
+        "capture_id": str(capture.id), "expires_at": (capture.created_at + REQUEST_TTL).isoformat()})
+    if not sent:
+        capture.status, capture.error_code = "FAILED", "agent_unavailable"
+        db.commit()
+        db.refresh(capture)
+    request.app.state.admin_events.publish({"type": "device.screenshot", "capture_id": str(capture.id),
+        "device_id": str(device_id), "status": capture.status})
+    return capture_out(capture)
+
+
+@router.get("/screenshots")
+def get_screenshots(device_id: UUID | None = None, limit: int = Query(default=100, ge=1, le=200),
+                    _admin=Depends(require_role("LAB_ADMIN")), db: Session = Depends(get_db)):
+    return list_captures(db, device_id=device_id, limit=limit)
+
+
+@router.get("/screenshots/{capture_id}/image")
+def get_screenshot_image(capture_id: UUID, request: Request,
+                         admin=Depends(require_role("LAB_ADMIN")), db: Session = Depends(get_db)):
+    capture = db.get(ScreenshotCapture, capture_id)
+    if capture is None or capture.status != "READY" or expired_at(capture.expires_at) or not capture.image_path:
+        raise HTTPException(status_code=404, detail={"code": "screenshot_not_found", "message": "Screenshot is unavailable or expired"})
+    expected_path = (FilePath(request.app.state.settings.screenshot_storage_dir).expanduser().resolve()
+                     / f"{capture.id}.jpg")
+    if FilePath(capture.image_path).resolve() != expected_path or not expected_path.is_file():
+        raise HTTPException(status_code=404, detail={"code": "screenshot_not_found", "message": "Screenshot image is unavailable"})
+    audit(db, admin.id, "device.screenshot.viewed", "screenshot_capture", str(capture.id),
+          {"device_id": str(capture.device_id)})
+    db.commit()
+    return FileResponse(expected_path, media_type="image/jpeg", filename=f"LabGuard-{capture.id}.jpg",
+                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@router.delete("/screenshots/{capture_id}", status_code=204)
+def remove_screenshot(capture_id: UUID, request: Request,
+                      admin=Depends(require_role("LAB_ADMIN", csrf=True)), db: Session = Depends(get_db)):
+    capture = db.get(ScreenshotCapture, capture_id)
+    if capture is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Screenshot not found"})
+    device_id = str(capture.device_id)
+    delete_capture(db, request.app.state.settings, capture, admin.id)
+    request.app.state.admin_events.publish({"type": "device.screenshot", "capture_id": str(capture_id),
+        "device_id": device_id, "status": "DELETED"})
+    return Response(status_code=204)
 
 
 @router.get("/devices/{device_id}/telemetry")

@@ -22,6 +22,8 @@ import { DeviceRdpAccess } from "./DeviceRdpAccess";
 import { DeviceProcesses } from "./DeviceProcesses";
 import { shortWindowsUsername } from "./username";
 import { PeripheralActivity } from "./PeripheralActivity";
+import { DeviceNetworkEvents } from "../network/DeviceNetworkEvents";
+import { DeviceScreenshotPanel } from "./ScreenshotMonitoringPage";
 
 const tabs = [
   "Overview",
@@ -31,11 +33,12 @@ const tabs = [
   "Network",
   "Remote Access",
   "Peripheral activity",
+  "Screenshots",
 ];
 export function DeviceDetailPage() {
   const { id = "" } = useParams();
   const [searchParams] = useSearchParams();
-  const [tab, setTab] = useState(searchParams.get("tab") === "Processes" ? "Processes" : "Overview");
+  const [tab, setTab] = useState(tabs.includes(searchParams.get("tab") ?? "") ? searchParams.get("tab")! : "Overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const { admin } = useAuth();
   const toast = useToast();
@@ -156,11 +159,7 @@ export function DeviceDetailPage() {
                 key={item}
               >
                 {item}
-                {!["Overview", "Hardware", "Software", "Network", "Remote Access", "Peripheral activity"].includes(item) && (
-                  <span className="ml-1 rounded bg-[var(--color-surface-subtle)] px-1 py-0.5 text-[7px] text-[var(--color-muted)]">
-                    SOON
-                  </span>
-                )}
+                {!["Overview", "Hardware", "Software", "Network", "Remote Access", "Peripheral activity", "Screenshots"].includes(item) }
               </button>
             ))}
           </div>
@@ -229,13 +228,18 @@ export function DeviceDetailPage() {
           ) : tab === "Hardware" ? (
             <SystemTelemetry id={id} />
           ) : tab === "Network" ? (
-            <NetworkInterfaces data={telemetry.data?.snapshot} deviceId={id} />
+            <div className="grid gap-4">
+              <NetworkInterfaces data={telemetry.data?.snapshot} deviceId={id} />
+              <DeviceNetworkEvents deviceId={id} />
+            </div>
           ) : tab === "Remote Access" ? (
             canManageLabs(admin?.role) ? <DeviceRdpAccess deviceId={id} /> : <Panel><p className="p-4 text-[10px] text-[var(--color-muted)]">Remote Desktop access requires lab-admin access.</p></Panel>
           ) : tab === "Processes" ? (
             canManageLabs(admin?.role) ? <DeviceProcesses deviceId={id} /> : <Panel><p className="p-4 text-[10px] text-[var(--color-muted)]">Process inspection and termination require lab-admin access.</p></Panel>
           ) : tab === "Peripheral activity" ? (
             <PeripheralActivity deviceId={id} />
+          ) : tab === "Screenshots" ? (
+            <DeviceScreenshotPanel deviceId={id} />
           ) : (
             <ComingSoon
               title={`${tab} data isn’t available yet`}

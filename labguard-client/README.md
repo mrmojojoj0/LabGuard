@@ -1,6 +1,8 @@
 # LabGuard Client
 
-Windows endpoint agent for authenticated device enrollment, heartbeat, telemetry, software inventory, individual WinGet/Chocolatey jobs, LAB_ADMIN-requested temporary RDP access, and bounded process inspection/termination. It does not provide arbitrary remote execution, packet capture, or USB monitoring.
+Windows endpoint agent for authenticated device enrollment, heartbeat, telemetry, software inventory, individual WinGet/Chocolatey jobs, LAB_ADMIN-requested temporary RDP access, bounded process inspection/termination, and on-demand screenshots.
+
+LAB_ADMIN on-demand screenshot requests run a temporary hidden helper as LocalSystem in the active console session; it shows no window or notification and does not impersonate the logged-in user. The helper saves a downscaled JPEG to the system temporary directory, and the service uploads it in bounded chunks over the authenticated WebSocket. An active console session is required. Install updated client dependencies (including Pillow) on each endpoint. Server captures are automatically deleted after 24 hours and can be manually deleted in the dashboard.
 
 ## Install
 

@@ -1,6 +1,6 @@
 # LabGuard Architecture and Current Implementation
 
-Status: Implemented foundation through authorized process management; WFP historical network monitoring enhancement under validation | Updated: 2026-11-10
+Status: Implemented fleet foundation, screenshots, and exam scheduling/reporting foundation; exam endpoint enforcement remains incomplete | Updated: 2026-11-11
 
 This document describes the current repository architecture. The original Phase 0 baseline is retained below as historical context; where it differs from the current implementation described here, this current implementation section is authoritative. For the current worktree, milestone state and verification see `docs/LabGuard_Development_State.md`.
 
@@ -8,7 +8,7 @@ This document describes the current repository architecture. The original Phase 
 
 LabGuard has three separate projects: a FastAPI/Pydantic/SQLAlchemy server in `labguard-server`, a Python 3.12 Windows agent in `labguard-client`, and a React/Vite/TypeScript dashboard in `labguard-dashboard`. PostgreSQL is the deployment database; server integration tests use SQLite and apply Alembic migrations. The dashboard is a separate development/build process and uses the server's same-origin `/api/v1` contract. The API and agent WebSocket run from the server; an authenticated admin Server-Sent Events endpoint supplies query invalidations to the dashboard.
 
-The implemented server handles administrator sessions and role checks, CSRF-protected mutations, enrollment and approval, Ed25519 device credentials and single-use WebSocket tickets, rooms and atomic grid layouts, device status, audit events, telemetry, software inventory, WinGet repository discovery, legacy catalog records, persistent individual software jobs, expiring RDP preparation requests, authorized process operations, and WFP connection-event history. The dashboard provides fleet/device views, a room floor-plan editor, telemetry and history, inventory, audit, direct and bulk software installation, job monitoring, a Remote Desktop handoff, per-device process inspection/termination, and network history. The client supports foreground execution and a Windows Service, protected identity state, heartbeat/reconnect, telemetry, local installed-software inventory, allowlisted WinGet/Chocolatey jobs, bounded RDP configuration leases, PID/creation-time guarded process actions, and persistent WFP event reading. Do not infer product capabilities from placeholder navigation items.
+The implemented server handles administrator sessions and role checks, CSRF-protected mutations, enrollment and approval, Ed25519 device credentials and single-use WebSocket tickets, rooms and atomic grid layouts, device status, audit events, telemetry, software inventory, WinGet repository discovery, legacy catalog records, persistent individual software jobs, expiring RDP preparation requests, authorized process operations, WFP connection-event history, screenshot storage, and an exam scheduling/violation foundation. The dashboard provides fleet/device views, a room floor-plan editor, telemetry and history, inventory, audit, direct and bulk software installation, job monitoring, a Remote Desktop handoff, per-device process inspection/termination, network history, screenshot review and exam scheduling/reporting. The client supports foreground execution and a Windows Service, protected identity state, heartbeat/reconnect, telemetry, local installed-software inventory, allowlisted WinGet/Chocolatey jobs, bounded RDP configuration leases, PID/creation-time guarded process actions, persistent WFP event reading, and on-demand screenshot capture. Exam endpoint enforcement is not implemented yet; see `docs/LabGuard_Exam_Management.md` before treating exam policies as applied.
 
 ### Network event monitoring
 
@@ -24,11 +24,13 @@ Audit records are written with their associated privileged database mutations. D
 
 ### Database and migrations
 
-Migration head is `0014_wfp_connection_events`, adding durable WFP events and monitoring state after 0013 peripheral activity. Model definitions are in `labguard-server/src/labguard_server/models.py`. PostgreSQL migration execution has not been verified in this worktree.
+Migration head is `0017_exam_management`, adding exam schedules and violation records after screenshot metadata. Model definitions are in `labguard-server/src/labguard_server/models.py`. PostgreSQL migration execution has not been verified in this worktree.
 
 ### REST API
 
 All routes are under `/api/v1`; the route implementation is `labguard-server/src/labguard_server/api.py`. Existing APIs include authentication, enrollment, device/credential lifecycle and deletion, rooms/layout, status, audit, telemetry, and software inventory. The v0.5 software inventory reads are `GET /devices/{id}/software`, `GET /software`, `GET /software/summary`, and `GET /software/{software_key}/installations`; an authorized administrator can request an online scan with `POST /devices/{id}/software/refresh`.
+
+The exam foundation adds Viewer+ `GET /exams` and `GET /exams/{id}/report`, LAB_ADMIN+ CSRF-protected `POST /exams` and `POST /exams/{id}/cancel`. Exam schedules reuse `Room`/`DevicePosition` device assignments and heartbeat state. The browser toggle stores the fixed common executable list (`msedge.exe`, `chrome.exe`, `firefox.exe`). See `docs/LabGuard_Exam_Management.md`: the saved restrictions are desired policy only and are not endpoint-enforced by the current client.
 
 The software-management endpoints are:
 
@@ -62,6 +64,12 @@ Software inventory uses `client.software_inventory` and server acknowledgements.
 - Client to server: `client.job.accepted`, `client.job.started`, `client.job.progress`, `client.job.completed`, and `client.job.failed`.
 
 The server binds events to the authenticated device, validates job ownership/state and sequence, persists each transition, and acknowledges the event. The authenticated admin SSE stream publishes `software.inventory` and `software.job` invalidations (also device status/connection/telemetry/deletion events). SSE carries invalidation metadata, not telemetry or secrets. The dashboard does not connect to the agent WSS endpoint.
+
+### On-demand screenshot capture
+
+LAB_ADMIN+ administrators can request a screenshot from the Screenshots tab in an individual device dashboard. The fleet Screenshots page is for reviewing and deleting captures. The LocalSystem service duplicates its own token, assigns the active console session, and launches a short-lived, noninteractive capture worker; this keeps access to the service-installed Python runtime without impersonating the logged-in student. The worker saves a downsized JPEG (maximum 1920x1080 and 4 MiB) in the system temporary directory, then the service validates and uploads it in 32 KiB chunks over the existing authenticated WSS connection. The worker has no visible window or notification. It captures the desktop only after an explicit administrator request and fails with a status when there is no active console session. This requires an active interactive Windows console session and does not capture disconnected RDP sessions. The server accepts only sequential, bounded JPEG chunks bound to the authenticated device and request.
+
+Migration `0016_screenshot_captures` stores capture metadata; image files are stored outside PostgreSQL in `SCREENSHOT_STORAGE_DIR` (default `data/screenshots`) and served only to LAB_ADMIN+ sessions with `Cache-Control: no-store`. Captures expire 24 hours after capture and are automatically deleted by the server retention monitor; authorized administrators can delete them earlier. Screenshot request and deletion actions are audited. Image bytes are not added to the audit log. Install the updated client with Pillow and restart the server after applying database migrations. Deploy silent screen capture only on managed exam devices under the institution's applicable policies.
 
 Before batching, the client reconciles only unambiguous WinGet/Registry pairs. It prefers exact package IDs; without an ID on one side, normalized names and a corroborating equal publisher or version are required. Conflicting known package ID, edition, version, publisher, architecture, or scope prevents merging. Unknown architecture/scope can be filled from the Registry record. Ambiguous and unmatched Registry rows stay visible. A reconciled row uses WINGET as its preferred source and persists both sources in `discovery_sources`. Reconciliation is deterministic and idempotent; the source-aware entry key also distinguishes names, package IDs, versions, architectures, scopes and locations.
 

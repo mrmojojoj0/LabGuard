@@ -1,8 +1,26 @@
 # LabGuard Development State and Handoff
 
-Updated: 2026-11-07
-Current baseline: direct and bulk software installation, unified inventory, catalog-independent safe uninstall, and temporary managed RDP access
-Next: controlled Windows endpoint validation of software flows and RDP lease setup/expiry; bulk targeting continues to use existing per-device jobs
+Updated: 2026-11-11
+Current baseline: existing fleet management and screenshots, plus an exam scheduling/dashboard foundation (endpoint restrictions remain incomplete)
+Next: implement authenticated exam policy delivery and reversible Windows enforcement; see `docs/LabGuard_Exam_Management.md`
+
+## Exam management foundation (2026-11-11)
+
+Added migration `0017_exam_management`, scheduled exam/policy records, room-position target validation, overlap rejection, automatic server schedule-state transitions, active-exam agent-offline alerts, and report data. Added WFP allow-list observation and USB-storage connection alerts; configured violation screenshots use the existing authenticated on-demand capture and 24-hour file retention. Added the Exams dashboard for whole-lab targeting, schedule/policy configuration, live room-position status, alerts and browser print-to-PDF reports. Every PC assigned to the chosen lab is included automatically and displayed at its room-grid position.
+
+The browser restriction control is a single toggle. When enabled, the server stores the fixed common executable list `msedge.exe`, `chrome.exe`, and `firefox.exe` in the exam policy rather than requiring administrators to type process names.
+
+This is not a completed enforcement system: the Windows agent does not yet receive/apply scheduled policies. Network policy currently detects and records connections outside the selected allow-list; it does not block them. USB and app/browser restrictions are not enforced (USB connect events can be flagged; executable names are only stored). Agent health alerting detects non-ONLINE state; service/config tamper detection and policy attestation are not implemented. Do not use the UI options as proof that endpoint restrictions are active. Full limitations and handoff are in `docs/LabGuard_Exam_Management.md`.
+
+Verification: dashboard `npm run typecheck` passed. SQLite Alembic upgrade through 0017 passed. Direct schema/database smoke check for room targets, scheduling and offline alerts passed. Dashboard tests could not start because Vite/Rolldown's Tailwind native binding failed to load (`spawn EPERM`). Full server pytest could not start because the server virtualenv lacks pytest and the available client pytest environment is missing the Starlette test-client dependency (`httpx2`). PostgreSQL and Windows endpoint tests remain outstanding. `git diff --check` passed with only line-ending normalization warnings.
+
+## On-demand screenshots (2026-11-11)
+
+- Added a LAB_ADMIN+ flow on each device dashboard to request an on-demand capture; the fleet Screenshots page lists captures for review and manual deletion.
+- Added an authenticated client request over the existing WSS session. On Windows, the LocalSystem service launches a hidden, short-lived Pillow helper under its own token attached to the active console session; no window or notification is shown. Captures require an active console desktop; disconnected RDP desktops are not supported.
+- Images are reduced to at most 1920x1080, limited to 4 MiB, uploaded in bounded 32 KiB chunks, and stored as server-side JPEG files with SHA-256 metadata. Metadata is in PostgreSQL migration `0016_screenshot_captures`; apply DB upgrades before enabling the updated dashboard/client.
+- Automatic deletion occurs 24 hours after capture; administrators can delete earlier. Requests and deletions are audited. Storage defaults to `labguard-server/data/screenshots` (`SCREENSHOT_STORAGE_DIR` can override it).
+- Added Pillow to the client dependency list. No tests or Windows service integration checks were run in this change; validate capture, WTS token launch, image transfer, expiry, deletion, and role checks on a managed Windows exam device before rollout.
 
 This document is the handoff entry point for a fresh agent session. Read it with `LabGuard_Architecture.md`, the relevant project `AGENTS.md` and README files. Verify the current Git state and code before editing; these files describe the current worktree, not a commit.
 
@@ -243,3 +261,11 @@ Handoff: on an elevated disposable Windows endpoint, reinstall/restart the servi
 ### Follow-up endpoint-log diagnosis (2026-11-11)
 
 Inspection of the active endpoint's `labguard-agent.log` found repeated `WFP event reader unavailable (AttributeError)` followed by `WFP event batch rejected by server (invalid_wfp_batch)`. The reader explicitly called `win32evtlog.EvtClose`, which is absent in the installed pywin32 module; pywin32 wraps EVT handles and closes them on object destruction. This prevented the reader from returning events. The resulting exception name was also mixed case (`AttributeError`), but the server schema accepts only uppercase error codes, so monitoring status batches were rejected too. The client now relies on pywin32 handle cleanup and uppercases reported codes. A direct schema validation of 247 locally enumerated processes also found and fixed the separate zero-creation-time case; after both client fixes, all sampled process batches validated. `auditpol /get` from the non-elevated inspection shell returned privilege error 0x522, so effective audit policy remains unverified. Rebuild/reinstall/restart the endpoint service, confirm these warnings stop and WFP status reports ACTIVE, then verify fresh Windows events reach the dashboard. This is not yet live end-to-end capture validation.
+
+### Device network view consistency (2026-11-11)
+
+The common Network Monitoring page showed WFP event history from `GET /network/events`, while the device Network tab showed only current psutil socket snapshots. The device tab now keeps its snapshot panel and adds the same WFP event history endpoint, filtered by the selected device and polling every 15 seconds. It exposes the same rolling two-minute window, public-IP default, Show Full Info toggle, event pagination, and per-device monitoring status/gap details. This makes the device page use the historical source shown on the common page while retaining current-socket context. UI changes have not yet been built or validated in a live browser.
+
+### Process list sorting and executable groups (2026-11-11)
+
+The device process table now sorts by executable/name, PID, CPU, memory, or username, with ascending/descending order, and groups matching executable paths by default. Each group offers a confirmed “Force kill all in group” action. The dashboard sends the existing audited PID plus creation-time guarded KILL requests sequentially for eligible group members, then refreshes the list and reports the successful count. PID 0/4 and entries without creation timestamps remain ineligible under the existing client safeguards. Dashboard build/typecheck and Windows endpoint behavior have not yet been validated for this change.

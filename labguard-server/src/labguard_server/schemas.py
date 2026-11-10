@@ -140,6 +140,119 @@ class ProcessResultIn(BaseModel):
             raise ValueError("Failed process listings cannot contain process entries")
         return self
 
+
+class ScreenshotChunkIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    capture_id: UUID
+    chunk_index: StrictInt = Field(ge=0, le=127)
+    chunk_count: StrictInt = Field(ge=1, le=128)
+    data: StrictStr = Field(min_length=4, max_length=44_000, pattern=r"^[A-Za-z0-9+/]+={0,2}$")
+
+    @model_validator(mode="after")
+    def chunk_is_in_range(self):
+        if self.chunk_index >= self.chunk_count:
+            raise ValueError("Screenshot chunk index must be less than chunk count")
+        return self
+
+
+class ScreenshotCaptureFailedIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    capture_id: UUID
+    error_code: StrictStr = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_:-]+$")
+
+
+class ExamPolicyIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Restrictions are persisted as desired policy. Actual endpoint enforcement is
+    # capability-reported by the agent and must never be inferred from this record.
+    network_mode: Literal["MONITOR", "ALLOW_LIST"] = "MONITOR"
+    allowed_networks: list[StrictStr] = Field(default_factory=list, max_length=64)
+    restricted_apps: list[StrictStr] = Field(default_factory=list, max_length=64)
+    restrict_browsers: StrictBool = False
+    restricted_browsers: list[StrictStr] = Field(default_factory=list, max_length=16)
+    block_usb_storage: StrictBool = False
+    screenshot_on_violation: StrictBool = False
+
+    @field_validator("allowed_networks")
+    @classmethod
+    def valid_networks(cls, values):
+        from ipaddress import ip_network
+        normalized = []
+        for value in values:
+            try:
+                normalized.append(str(ip_network(value, strict=False)))
+            except ValueError as exc:
+                raise ValueError("Allowed networks must be IPv4 or IPv6 CIDR ranges") from exc
+        return list(dict.fromkeys(normalized))
+
+    @field_validator("restricted_apps", "restricted_browsers")
+    @classmethod
+    def valid_executable_names(cls, values):
+        result = []
+        for value in values:
+            name = value.strip().casefold()
+            if (not name or len(name) > 128 or "/" in name or "\\" in name
+                    or not re.fullmatch(r"[a-z0-9_.-]+", name)):
+                raise ValueError("Restrictions must use executable names such as app.exe")
+            if not name.endswith(".exe"):
+                name += ".exe"
+            if name not in result:
+                result.append(name)
+        return result
+
+    @model_validator(mode="after")
+    def allow_list_needs_entries(self):
+        if self.network_mode == "ALLOW_LIST" and not self.allowed_networks:
+            raise ValueError("Allow-list network mode requires at least one CIDR range")
+        # Store the executable match list with the policy, but let administrators
+        # choose it through one supported toggle rather than entering process names.
+        self.restricted_browsers = ["msedge.exe", "chrome.exe", "firefox.exe"] if self.restrict_browsers else []
+        return self
+
+
+class ExamCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=160)
+    room_id: UUID
+    device_ids: list[UUID] = Field(min_length=1, max_length=250)
+    starts_at: datetime
+    ends_at: datetime
+    policy: ExamPolicyIn = Field(default_factory=ExamPolicyIn)
+
+    @field_validator("title")
+    @classmethod
+    def clean_title(cls, value):
+        value = value.strip()
+        if not value or any(ord(char) < 32 for char in value):
+            raise ValueError("Exam title must contain printable characters")
+        return value
+
+    @model_validator(mode="after")
+    def valid_schedule(self):
+        if self.starts_at.tzinfo is None or self.ends_at.tzinfo is None:
+            raise ValueError("Exam schedule timestamps must include a timezone")
+        if self.ends_at <= self.starts_at:
+            raise ValueError("Exam end must be after its start")
+        if len(set(self.device_ids)) != len(self.device_ids):
+            raise ValueError("Each device may be selected once")
+        return self
+
+
+class ExamOut(BaseModel):
+    id: UUID
+    room_id: UUID
+    room_name: str
+    title: str
+    starts_at: datetime
+    ends_at: datetime
+    status: Literal["SCHEDULED", "ACTIVE", "COMPLETED", "CANCELLED"]
+    device_ids: list[UUID]
+    policy: ExamPolicyIn
+    created_at: datetime
+    updated_at: datetime
+    violations: int = 0
+
+
 class RoomCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=500)

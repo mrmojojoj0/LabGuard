@@ -22,6 +22,8 @@ from labguard_server.process_management import record_process_result
 from labguard_server.schemas import ProcessResultIn
 from labguard_server.schemas import PeripheralSnapshotIn
 from labguard_server.peripheral_activity import record_peripheral_snapshot
+from labguard_server.schemas import ScreenshotChunkIn, ScreenshotCaptureFailedIn
+from labguard_server.screenshot_service import receive_chunk, fail_capture
 from labguard_server.schemas import WfpEventBatchIn
 from labguard_server.wfp_activity import record_wfp_batch
 
@@ -101,6 +103,14 @@ def _persist_peripheral_snapshot(factory, device_id, sequence, payload):
 def _persist_wfp_batch(factory, device_id, sequence, payload):
     with factory() as db:
         return record_wfp_batch(db, device_id, sequence, payload)
+
+
+def _persist_screenshot_event(factory, settings, device_id, sequence, event_type, payload):
+    with factory() as db:
+        record_agent_event(db, device_id, sequence, event_type)
+        if event_type == "client.screenshot.chunk":
+            return receive_chunk(db, settings, device_id, payload)
+        return fail_capture(db, device_id, payload.capture_id, payload.error_code)
 
 
 def _consume_invalid_telemetry(factory, device_id, sequence):
@@ -196,6 +206,17 @@ async def dispatch_pending_process_requests(application, device_id: UUID) -> Non
             break
 
 
+async def send_screenshot_request(application, device_id: UUID, payload: dict) -> bool:
+    websocket = application.state.active_devices.get(device_id)
+    if websocket is None:
+        return False
+    try:
+        await _send(websocket, device_id, "server.screenshot.request", payload)
+        return True
+    except (RuntimeError, WebSocketDisconnect):
+        return False
+
+
 @router.websocket("/agent/session")
 async def agent_session(websocket: WebSocket):
     authorization = websocket.headers.get("authorization", "")
@@ -259,7 +280,7 @@ async def agent_session(websocket: WebSocket):
                                   "client.job.accepted", "client.job.started", "client.job.progress",
                                   "client.job.completed", "client.job.failed", "client.rdp.access.result",
                                   "client.process.result", "client.peripheral.snapshot",
-                                  "client.network.wfp"}:
+                                  "client.network.wfp", "client.screenshot.chunk", "client.screenshot.failed"}:
                 await websocket.close(code=4400, reason="unsupported_event")
                 return
             if event.type == "client.telemetry":
@@ -477,6 +498,32 @@ async def agent_session(websocket: WebSocket):
                         "request_id": str(process_result.request_id), "status": result.get("status")})
                 await _send(websocket, device_id, "server.ack", {
                     "event_id": str(event.event_id), **result})
+                continue
+            if event.type in {"client.screenshot.chunk", "client.screenshot.failed"}:
+                try:
+                    screenshot_payload = (ScreenshotChunkIn.model_validate(event.payload)
+                        if event.type == "client.screenshot.chunk"
+                        else ScreenshotCaptureFailedIn.model_validate(event.payload))
+                except ValidationError:
+                    await _send(websocket, device_id, "server.ack", {
+                        "event_id": str(event.event_id), "accepted": False,
+                        "reason": "invalid_screenshot_event"})
+                    continue
+                try:
+                    result = await asyncio.to_thread(_persist_screenshot_event,
+                        websocket.app.state.session_factory, websocket.app.state.settings,
+                        device_id, event.sequence, event.type, screenshot_payload)
+                except HTTPException:
+                    await websocket.close(code=4401, reason="device_not_authorized_or_replayed")
+                    return
+                except Exception:
+                    logging.getLogger("labguard_server.websocket").exception("Failed storing screenshot capture")
+                    result = {"accepted": False, "reason": "screenshot_storage_error"}
+                if result.get("accepted") and result.get("status") in {"READY", "FAILED"}:
+                    websocket.app.state.admin_events.publish({"type": "device.screenshot",
+                        "capture_id": str(screenshot_payload.capture_id), "device_id": str(device_id),
+                        "status": result["status"]})
+                await _send(websocket, device_id, "server.ack", {"event_id": str(event.event_id), **result})
                 continue
             try:
                 received_at = _record(device_id, event.sequence, "client.heartbeat", websocket)

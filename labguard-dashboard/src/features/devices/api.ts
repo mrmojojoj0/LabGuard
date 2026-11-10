@@ -7,6 +7,7 @@ import type {
   DeviceTelemetry,
   PeripheralActivity,
   RdpAccessRequest,
+  ScreenshotCapture,
   TelemetrySample,
   TelemetrySummary,
 } from "../../lib/types";
@@ -42,4 +43,11 @@ export const devicesApi = {
     }),
   processRequest: (deviceId: string, requestId: string) =>
     api<DeviceProcessRequest>(`/devices/${deviceId}/process-requests/${requestId}`),
+  screenshots: (deviceId?: string) => api<ScreenshotCapture[]>(
+    `/screenshots?limit=100${deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ""}`,
+  ),
+  requestScreenshot: (deviceId: string) =>
+    api<ScreenshotCapture>(`/devices/${deviceId}/screenshots`, { method: "POST", body: "{}" }),
+  deleteScreenshot: (captureId: string) =>
+    api<void>(`/screenshots/${captureId}`, { method: "DELETE" }),
 };
