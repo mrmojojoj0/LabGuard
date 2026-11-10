@@ -5,6 +5,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -67,6 +68,18 @@ def service_command(action: str, *, insecure_dev: bool = False) -> str:
         config = AgentConfig.load(CONFIG_PATH)
         if not (config.state_dir / "identity.json").is_file():
             raise RuntimeError("Service identity is missing; prepare again with the original enrolled identity")
+        try:
+            subprocess.run(
+                ["auditpol.exe", "/set", "/subcategory:Filtering Platform Connection",
+                 "/success:enable", "/failure:enable"],
+                check=True, capture_output=True, text=True, timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(
+                "Could not enable Windows Filtering Platform connection auditing. "
+                "Run client installation as Administrator and ensure local audit policy is not blocked by Group Policy."
+            ) from exc
         service_host = _service_host_executable(win32service)
         try:
             existing_status = win32serviceutil.QueryServiceStatus(SERVICE_NAME)
@@ -74,7 +87,7 @@ def service_command(action: str, *, insecure_dev: bool = False) -> str:
             existing_status = None
         else:
             if service_host is None:
-                return f"Service {SERVICE_NAME} is already installed"
+                return f"Service {SERVICE_NAME} is already installed; Windows connection auditing is enabled"
             if existing_status[1] != win32service.SERVICE_STOPPED:
                 raise RuntimeError(f"Stop {SERVICE_NAME} before updating its Python Service host path")
             win32serviceutil.ChangeServiceConfig(
@@ -92,7 +105,7 @@ def service_command(action: str, *, insecure_dev: bool = False) -> str:
             "labguard_client.windows_service.LabGuardWindowsService", SERVICE_NAME, SERVICE_DISPLAY_NAME,
             **install_options,
         )
-        return f"Installed {SERVICE_NAME} (automatic start)"
+        return f"Installed {SERVICE_NAME} (automatic start); Windows connection auditing is enabled"
     if action == "uninstall":
         try:
             win32serviceutil.StopService(SERVICE_NAME)

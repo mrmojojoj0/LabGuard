@@ -6,7 +6,7 @@ import time
 import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import uvicorn
 import pytest
@@ -16,7 +16,8 @@ from labguard_client.agent import AgentClient
 from labguard_client.identity import DeviceIdentity
 from labguard_server.config import Settings
 from labguard_server.main import create_app
-from labguard_server.models import Device, DeviceStatus, DeviceStatusEvent, DeviceTelemetryLatest, TelemetrySample
+from labguard_server.models import (Device, DeviceStatus, DeviceStatusEvent, DeviceTelemetryLatest,
+                                    DeviceWfpEvent, TelemetrySample)
 from tests.conftest import login
 
 
@@ -88,6 +89,23 @@ def test_two_real_client_instances_heartbeat_disconnect_and_reconnect(client, mo
         reports = await asyncio.gather(submit_telemetry(agent_one, ws_one, "WS-PC-01"),
                                        submit_telemetry(agent_two, ws_two, "WS-PC-02"))
         assert all(report["type"] == "server.ack" and report["payload"]["accepted"] for report in reports)
+        wfp_payload = {"log_generation": str(uuid4()), "cursor_record_id": 901,
+            "status": "ACTIVE", "gap_reason": None, "error_code": None,
+            "events": [{"event_record_id": 901, "event_id": 5156,
+                "event_time": datetime.now(UTC).isoformat(), "event_kind": "CONNECTION_ALLOWED",
+                "direction": "OUTGOING", "protocol": "TCP", "protocol_number": 6,
+                "source_ip": "192.168.1.25", "source_port": 50123,
+                "destination_ip": "8.8.8.8", "destination_port": 443,
+                "process_id": 1234, "process_path": r"C:\Windows\curl.exe"}]}
+        wfp_envelope = agent_one._envelope("client.network.wfp", wfp_payload)
+        await ws_one.send(json.dumps(wfp_envelope, separators=(",", ":")))
+        wfp_ack = json.loads(await asyncio.wait_for(ws_one.recv(), 2))
+        assert wfp_ack["type"] == "server.ack" and wfp_ack["payload"]["accepted"] is True
+        with server_app.state.session_factory() as db:
+            event = db.scalars(select(DeviceWfpEvent).where(
+                DeviceWfpEvent.device_id == UUID(identity_one.device_id))).one()
+            assert event.event_record_id == 901 and event.remote_ip == "8.8.8.8"
+            assert event.process_id == 1234
         await agent_one.heartbeat(ws_one)
         await agent_two.heartbeat(ws_two)
         await ws_two.close()

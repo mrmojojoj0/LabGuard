@@ -42,6 +42,7 @@ import { AuditPage } from "../features/audit/AuditPage";
 import { SoftwarePage } from "../features/software/SoftwarePage";
 import { SoftwareDeploymentPage } from "../features/software/SoftwareDeploymentPage";
 import { ProcessMonitoringPage } from "../features/devices/ProcessMonitoringPage";
+import { NetworkMonitoringPage } from "../features/network/NetworkMonitoringPage";
 import { ComingSoon } from "../components/ui";
 import type { Device } from "../lib/types";
 
@@ -359,6 +360,9 @@ function AdminEventBridge() {
     stream.addEventListener("device.connection", refresh);
     stream.addEventListener("device.telemetry", refreshTelemetry);
     stream.addEventListener("device.peripherals", refreshPeripherals);
+    stream.addEventListener("device.network", () => {
+      void queryClient.invalidateQueries({ queryKey: ["network-events"] });
+    });
     stream.addEventListener("software.inventory", refreshSoftware);
     stream.addEventListener("software.job", refreshSoftwareJobs);
     const deviceDeleted = (event: MessageEvent<string>) => {
@@ -413,7 +417,7 @@ function RoutedShell() {
           />
           <Route
             path="/network"
-            element={<Placeholder title="Network Monitoring" />}
+            element={<NetworkMonitoringPage />}
           />
           <Route path="/usb" element={<Placeholder title="USB Monitoring" />} />
           <Route

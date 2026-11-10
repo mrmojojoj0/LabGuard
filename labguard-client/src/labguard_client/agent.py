@@ -29,6 +29,7 @@ from labguard_client.software_management import (PackageManagerUnavailable, Soft
 from labguard_client.rdp_access import cleanup_expired_rdp_access, prepare_rdp_access
 from labguard_client.process_control import MAX_PROCESSES, list_processes, terminate_process
 from labguard_client.peripherals import collect_peripherals
+from labguard_client.network_events import WfpEventReader
 
 
 class AgentClient:
@@ -54,6 +55,8 @@ class AgentClient:
         self.timeout = timeout
         self.boot_id = str(uuid4())
         self.ssl_context = ssl.create_default_context()
+        identity_state = getattr(identity, "state_file", None)
+        self.wfp_reader = WfpEventReader(identity_state.parent / "wfp-event-cursor.json") if identity_state else None
 
     def _post(self, path: str, data: dict) -> dict:
         url = self.server_url + path
@@ -220,6 +223,29 @@ class AgentClient:
                 if await self._wait_or_stop(stop, self.telemetry_interval_seconds):
                     break
 
+        async def wfp_event_loop():
+            if self.wfp_reader is None:
+                logger.warning("WFP event collection unavailable (persistent device state path missing)")
+                await stop.wait()
+                return
+            while not stop.is_set():
+                try:
+                    await asyncio.to_thread(self.wfp_reader.poll)
+                    batch = self.wfp_reader.next_batch()
+                    if batch is not None:
+                        ack = await self._send_session_event(ws, "client.network.wfp", batch, pending, send_lock)
+                        if ack.get("accepted"):
+                            await asyncio.to_thread(self.wfp_reader.acknowledge, batch)
+                        else:
+                            logger.warning("WFP event batch rejected by server (%s)", ack.get("reason", "unknown"))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("WFP event collection/transmission failed (%s)", type(exc).__name__)
+                delay = 0.01 if self.wfp_reader.pending.qsize() else 2
+                if await self._wait_or_stop(stop, delay):
+                    break
+
         async def software_inventory_loop():
             first_collection = True
             while not stop.is_set():
@@ -298,7 +324,7 @@ class AgentClient:
                  asyncio.create_task(software_inventory_loop()),
                  asyncio.create_task(software_job_loop()), asyncio.create_task(rdp_access_loop()),
                  asyncio.create_task(process_request_loop()), asyncio.create_task(stop.wait()),
-                 asyncio.create_task(peripheral_snapshot_loop())]
+                 asyncio.create_task(peripheral_snapshot_loop()), asyncio.create_task(wfp_event_loop())]
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             if tasks[7] in done:

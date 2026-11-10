@@ -22,6 +22,8 @@ from labguard_server.process_management import record_process_result
 from labguard_server.schemas import ProcessResultIn
 from labguard_server.schemas import PeripheralSnapshotIn
 from labguard_server.peripheral_activity import record_peripheral_snapshot
+from labguard_server.schemas import WfpEventBatchIn
+from labguard_server.wfp_activity import record_wfp_batch
 
 router = APIRouter(prefix="/api/v1")
 MAX_FRAME_BYTES = 64 * 1024
@@ -94,6 +96,11 @@ def _persist_process_result(factory, device_id, sequence, payload):
 def _persist_peripheral_snapshot(factory, device_id, sequence, payload):
     with factory() as db:
         return record_peripheral_snapshot(db, device_id, sequence, payload)
+
+
+def _persist_wfp_batch(factory, device_id, sequence, payload):
+    with factory() as db:
+        return record_wfp_batch(db, device_id, sequence, payload)
 
 
 def _consume_invalid_telemetry(factory, device_id, sequence):
@@ -251,7 +258,8 @@ async def agent_session(websocket: WebSocket):
             if event.type not in {"client.heartbeat", "client.telemetry", "client.software_inventory",
                                   "client.job.accepted", "client.job.started", "client.job.progress",
                                   "client.job.completed", "client.job.failed", "client.rdp.access.result",
-                                  "client.process.result", "client.peripheral.snapshot"}:
+                                  "client.process.result", "client.peripheral.snapshot",
+                                  "client.network.wfp"}:
                 await websocket.close(code=4400, reason="unsupported_event")
                 return
             if event.type == "client.telemetry":
@@ -321,6 +329,34 @@ async def agent_session(websocket: WebSocket):
                     "accepted": accepted, "changed": changed,
                     "server_received_at": received_at.isoformat() if accepted else None,
                     "reason": reason})
+                continue
+            if event.type == "client.network.wfp":
+                try:
+                    batch = WfpEventBatchIn.model_validate(event.payload)
+                except ValidationError:
+                    try:
+                        await asyncio.to_thread(_consume_invalid_telemetry, websocket.app.state.session_factory,
+                                                device_id, event.sequence)
+                    except HTTPException:
+                        await websocket.close(code=4401, reason="device_not_authorized_or_replayed")
+                        return
+                    await _send(websocket, device_id, "server.ack", {"event_id": str(event.event_id),
+                        "accepted": False, "reason": "invalid_wfp_batch"})
+                    continue
+                try:
+                    accepted, result = await asyncio.to_thread(_persist_wfp_batch,
+                        websocket.app.state.session_factory, device_id, event.sequence, batch)
+                except HTTPException:
+                    await websocket.close(code=4401, reason="device_not_authorized_or_replayed")
+                    return
+                except Exception:
+                    logging.getLogger("labguard_server.websocket").exception("Failed storing WFP events")
+                    accepted, result = False, "wfp_storage_error"
+                if accepted:
+                    websocket.app.state.admin_events.publish({"type": "device.network", "device_id": str(device_id)})
+                await _send(websocket, device_id, "server.ack", {"event_id": str(event.event_id),
+                    "accepted": accepted, "result": result if accepted else None,
+                    "reason": None if accepted else result})
                 continue
             if event.type == "client.software_inventory":
                 try:

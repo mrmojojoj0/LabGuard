@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Cpu, MemoryStick, HardDrive, Activity } from "lucide-react";
 import { devicesApi } from "./api";
+import { networkApi } from "../network/api";
 import { Panel, PanelTitle, QueryError, Skeleton } from "../../components/ui";
 import type { TelemetrySample, TelemetrySnapshot } from "../../lib/types";
 
@@ -21,6 +23,34 @@ function formatUptime(value: number) {
   const hours = Math.floor((value % 86400) / 3600);
   const minutes = Math.floor((value % 3600) / 60);
   return `${days}d ${hours}h ${minutes}m`;
+}
+
+function isPublicRemoteIp(value: string | null) {
+  if (!value) return false;
+  const ip = value.split("%", 1)[0].toLowerCase();
+  const octets = ip.split(".").map(Number);
+  if (octets.length === 4 && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+    const [a, b] = octets;
+    return !(a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && (b === 0 || b === 2 || b === 168)) ||
+      (a === 198 && (b === 18 || b === 19 || b === 51)) ||
+      (a === 203 && b === 0 && Number(octets[2]) === 113));
+  }
+
+  if (ip.includes(".")) return isPublicRemoteIp(ip.slice(ip.lastIndexOf(":") + 1));
+  const first = ip.split(":", 1)[0];
+  const firstGroup = Number.parseInt(first || "0", 16);
+  return !(
+    ip === "::" || ip === "::1" ||
+    firstGroup < 0x2000 || firstGroup > 0x3fff ||
+    ip.startsWith("2001:db8:") ||
+    (firstGroup >= 0xfc00 && firstGroup <= 0xfdff) ||
+    (firstGroup >= 0xfe80 && firstGroup <= 0xfebf) ||
+    firstGroup >= 0xff00
+  );
 }
 
 export function OperatingSystemUptime({ data }: { data: TelemetrySnapshot | null | undefined }) {
@@ -60,44 +90,67 @@ export function OperatingSystemUptime({ data }: { data: TelemetrySnapshot | null
   );
 }
 
-export function NetworkInterfaces({ data }: { data: TelemetrySnapshot | null | undefined }) {
+export function NetworkInterfaces({ data, deviceId }: { data: TelemetrySnapshot | null | undefined; deviceId: string }) {
+  const [showFullInfo, setShowFullInfo] = useState(false);
+  const organizationQuery = useQuery({
+    queryKey: ["network-connections"],
+    queryFn: networkApi.connections,
+    refetchInterval: 30_000,
+  });
   const connections = data?.network_connections;
+  const organizations = new Map(
+    (organizationQuery.data?.connections ?? [])
+      .filter((connection) => connection.device_id === deviceId)
+      .map((connection) => [connection.remote_ip, connection.organization]),
+  );
+  const visibleConnections = showFullInfo
+    ? connections
+    : connections?.filter((connection) => isPublicRemoteIp(connection.remote_ip));
   return (
     <Panel>
-      <PanelTitle>Network activity</PanelTitle>
+      <PanelTitle aside={<button className="text-[9px] font-medium text-[var(--color-primary)]" onClick={() => setShowFullInfo((visible) => !visible)}>{showFullInfo ? "Hide full info" : "Show full info"}</button>}>Network activity</PanelTitle>
       {!data ? (
         <p className="py-3 text-[9px] text-[var(--color-muted)]">Waiting for the first telemetry report.</p>
       ) : connections == null ? (
         <p className="py-3 text-[9px] text-[var(--color-muted)]">No network connection snapshot is available from this endpoint.</p>
-      ) : connections.length ? (
+      ) : visibleConnections?.length ? (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[900px] text-left text-[10px]">
             <thead>
               <tr className="border-b border-[var(--color-border)] text-[var(--color-muted)]">
                 <th className="p-2">Time</th><th className="p-2">Direction</th><th className="p-2">Domain / IP</th>
-                <th className="p-2">Type</th><th className="p-2">Interface</th><th className="p-2">Local endpoint</th>
-                <th className="p-2">Remote endpoint</th><th className="p-2">State</th>
+                <th className="p-2">Type</th>{showFullInfo && <><th className="p-2">Interface</th><th className="p-2">Local endpoint</th>
+                <th className="p-2">Remote endpoint</th></>}<th className="p-2">Organization</th><th className="p-2">State</th>
               </tr>
             </thead>
             <tbody>
-              {connections.map((connection, index) => (
+              {visibleConnections.map((connection, index) => (
                 <tr className="border-b border-[var(--color-border)] last:border-0" key={`${connection.protocol}:${connection.local_ip}:${connection.local_port}:${connection.remote_ip}:${connection.remote_port}:${index}`}>
                   <td className="whitespace-nowrap p-2">{new Date(connection.observed_at).toLocaleString()}</td>
                   <td className="p-2">{connection.direction.toLowerCase()}</td>
                   <td className="p-2 font-mono">{connection.remote_ip ?? connection.local_ip}</td>
                   <td className="p-2">{connection.protocol}</td>
-                  <td className="p-2">{connection.interface}</td>
-                  <td className="p-2 font-mono">{connection.local_ip}:{connection.local_port}</td>
-                  <td className="p-2 font-mono">{connection.remote_ip ? `${connection.remote_ip}:${connection.remote_port ?? ""}` : "—"}</td>
+                  {showFullInfo && <td className="p-2">{connection.interface}</td>}
+                  {showFullInfo && <td className="p-2 font-mono">{connection.local_ip}:{connection.local_port}</td>}
+                  {showFullInfo && <td className="p-2 font-mono">{connection.remote_ip ? `${connection.remote_ip}:${connection.remote_port ?? ""}` : "—"}</td>}
+                  <td className="p-2">
+                    {connection.remote_ip && organizations.get(connection.remote_ip)
+                      ? <>{organizations.get(connection.remote_ip)?.as_name ?? "Unknown"}<span className="block text-[8px] text-[var(--color-muted)]">{organizations.get(connection.remote_ip)?.asn ?? ""}{organizations.get(connection.remote_ip)?.as_domain ? ` · ${organizations.get(connection.remote_ip)?.as_domain}` : ""}</span></>
+                      : connection.remote_ip && organizationQuery.data?.lookups_enabled
+                        ? "Lookup unavailable"
+                        : connection.remote_ip
+                          ? "Not configured"
+                          : "—"}
+                  </td>
                   <td className="p-2">{connection.state}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <p className="mt-3 text-[8px] text-[var(--color-muted)]">Active TCP/UDP connection snapshots update with telemetry, about every 30 seconds. Packet headers and payloads are not collected.</p>
+          <p className="mt-3 text-[8px] text-[var(--color-muted)]">Windows connection events and active socket snapshots are reported with telemetry. Private, local, loopback, and link-local remote addresses are hidden by default. Organization lookups use only public remote IPs. The organization is the ASN network operator and may differ from the service owner. Packet contents and URLs are not collected.</p>
         </div>
       ) : (
-        <p className="py-3 text-[9px] text-[var(--color-muted)]">No active network connections were reported.</p>
+        <p className="py-3 text-[9px] text-[var(--color-muted)]">{connections.length ? "No public remote-IP connections. Click Show full info to include private and local connections." : "No active network connections were reported."}</p>
       )}
     </Panel>
   );

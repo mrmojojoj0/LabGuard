@@ -75,13 +75,50 @@ export interface TelemetryInterface {
 export interface TelemetryNetworkConnection {
   observed_at: string;
   direction: "INCOMING" | "OUTGOING" | "UNKNOWN";
-  protocol: "TCP" | "UDP";
+  protocol: "TCP" | "UDP" | "ICMP";
   local_ip: string;
   local_port: number;
   remote_ip: string | null;
   remote_port: number | null;
   interface: string;
   state: string;
+}
+export interface WfpNetworkEvent {
+  id: string; device_id: string; device_name: string; log_generation: string;
+  event_record_id: number; event_id: number; event_time: string;
+  event_kind: "PACKET_BLOCKED" | "CONNECTION_ALLOWED" | "CONNECTION_BLOCKED";
+  direction: "INCOMING" | "OUTGOING" | "UNKNOWN";
+  protocol: "TCP" | "UDP" | "ICMP" | "OTHER"; protocol_number: number;
+  source_ip: string; source_port: number | null; destination_ip: string;
+  destination_port: number | null; remote_ip: string; process_id: number | null;
+  process_path: string | null; source: "WFP_EVENT";
+  organization: { asn?: string; as_name?: string; as_domain?: string; country?: string } | null;
+}
+export interface WfpMonitoringState {
+  device_id: string; device_name: string; status: "STARTING" | "ACTIVE" | "GAP" | "UNAVAILABLE";
+  gap_reason: string | null; error_code: string | null; cursor_record_id: number; updated_at: string;
+  stale: boolean;
+}
+export interface WfpNetworkEventsResponse {
+  events: WfpNetworkEvent[]; total: number; limit: number; offset: number;
+  monitoring: WfpMonitoringState[]; show_full_info: boolean; lookups_enabled: boolean;
+}
+export interface PublicNetworkConnection extends Omit<TelemetryNetworkConnection, "local_ip" | "remote_ip"> {
+  device_id: string;
+  device_name: string;
+  remote_ip: string;
+  organization: {
+    asn: string | null;
+    as_name: string | null;
+    as_domain: string | null;
+    country: string | null;
+    country_code: string | null;
+  } | null;
+}
+export interface NetworkConnectionsResponse {
+  connections: PublicNetworkConnection[];
+  lookups_enabled: boolean;
+  public_ip_count: number;
 }
 export interface TelemetrySnapshot {
   collected_at: string;

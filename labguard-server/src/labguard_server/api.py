@@ -2,6 +2,7 @@ from uuid import UUID, uuid4
 from time import monotonic
 import json
 import getpass
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -22,6 +23,9 @@ from labguard_server.services import (approve_device, audit, authenticate, creat
                                       update_room)
 from labguard_server.telemetry import latest_telemetry, telemetry_history, telemetry_summary
 from labguard_server.peripheral_activity import peripheral_activity as get_peripheral_activity
+from labguard_server.network_activity import network_activity
+from labguard_server.wfp_activity import wfp_activity
+from labguard_server.network_activity import _is_public_ip, _lookup_ipinfo
 from labguard_server.software_inventory import (device_software_items, global_software_list, inventory_status,
                                                 software_installations, software_summary)
 from labguard_server.websocket import request_software_inventory_refresh
@@ -270,6 +274,36 @@ def device_peripherals(device_id: UUID, limit: int = Query(default=100, ge=1, le
 @router.get("/telemetry/summary")
 def telemetry_overview(request: Request, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
     return telemetry_summary(db, request.app.state.settings.telemetry_stale_after_seconds)
+
+
+@router.get("/network/connections")
+def network_connections(request: Request, _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    return network_activity(db, request.app.state.settings.ipinfo_token)
+
+
+@router.get("/network/events")
+def network_events(request: Request, limit: int = Query(default=100, ge=1, le=500),
+                   offset: int = Query(default=0, ge=0, le=1_000_000),
+                   since_seconds: int | None = Query(default=None, ge=1, le=2_592_000),
+                   device_id: UUID | None = None,
+                   event_kind: str | None = Query(default=None, pattern=r"^(CONNECTION_ALLOWED|CONNECTION_BLOCKED|PACKET_BLOCKED)$"),
+                   show_full_info: bool = False,
+                   _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    result = wfp_activity(db, limit=limit, offset=offset, device_id=device_id,
+                          event_kind=event_kind, public_only=not show_full_info,
+                          since_seconds=since_seconds)
+    token = request.app.state.settings.ipinfo_token
+    addresses = list(dict.fromkeys(event["remote_ip"] for event in result["events"]
+                                   if _is_public_ip(event["remote_ip"])))
+    organizations = {}
+    if token and addresses:
+        with ThreadPoolExecutor(max_workers=min(20, len(addresses))) as pool:
+            organizations.update(zip(addresses[:40], pool.map(lambda address: _lookup_ipinfo(address, token), addresses[:40])))
+    for event in result["events"]:
+        event["organization"] = organizations.get(event["remote_ip"])
+    result["show_full_info"] = show_full_info
+    result["lookups_enabled"] = bool(token)
+    return result
 
 
 @router.get("/rooms/{room_id}/layout", response_model=LayoutOut)

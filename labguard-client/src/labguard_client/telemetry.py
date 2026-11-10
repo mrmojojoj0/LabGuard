@@ -144,7 +144,8 @@ def collect_system_telemetry() -> dict:
     physical = psutil.cpu_count(logical=False)
     now = time.time()
     collected_at = datetime.now(UTC).isoformat()
-    network_connections = _collect_network_connections(interfaces, collected_at)
+    # Keep periodic psutil socket state separate from historical WFP events.
+    network_connections = _collect_network_connections(interfaces, collected_at) or []
     return {
         "collected_at": collected_at,
         "cpu": {"processor_name": _processor_name(), "logical_processors": int(logical),

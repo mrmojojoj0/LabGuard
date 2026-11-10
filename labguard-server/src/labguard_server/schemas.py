@@ -279,7 +279,7 @@ class TelemetryNetworkConnection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     observed_at: datetime
     direction: Literal["INCOMING", "OUTGOING", "UNKNOWN"]
-    protocol: Literal["TCP", "UDP"]
+    protocol: Literal["TCP", "UDP", "ICMP"]
     local_ip: IPv4Address | IPv6Address
     local_port: StrictInt = Field(ge=0, le=65535)
     remote_ip: IPv4Address | IPv6Address | None = None
@@ -293,6 +293,51 @@ class TelemetryNetworkConnection(BaseModel):
         if value.tzinfo is None:
             raise ValueError("Network connection timestamp must include a timezone")
         return value
+
+
+class WfpConnectionEventIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_record_id: StrictInt = Field(ge=1, le=2**63 - 1)
+    event_id: Literal[5152, 5156, 5157]
+    event_time: datetime
+    event_kind: Literal["PACKET_BLOCKED", "CONNECTION_ALLOWED", "CONNECTION_BLOCKED"]
+    direction: Literal["INCOMING", "OUTGOING", "UNKNOWN"]
+    protocol: Literal["TCP", "UDP", "ICMP", "OTHER"]
+    protocol_number: StrictInt = Field(ge=0, le=255)
+    source_ip: IPv4Address | IPv6Address
+    source_port: StrictInt | None = Field(default=None, ge=0, le=65535)
+    destination_ip: IPv4Address | IPv6Address
+    destination_port: StrictInt | None = Field(default=None, ge=0, le=65535)
+    process_id: StrictInt | None = Field(default=None, ge=0, le=4_294_967_295)
+    process_path: StrictStr | None = Field(default=None, max_length=1024)
+
+    @model_validator(mode="after")
+    def event_fields_are_consistent(self):
+        if self.event_time.tzinfo is None:
+            raise ValueError("WFP event timestamp must include a timezone")
+        expected = {5152: "PACKET_BLOCKED", 5156: "CONNECTION_ALLOWED", 5157: "CONNECTION_BLOCKED"}[self.event_id]
+        if self.event_kind != expected:
+            raise ValueError("WFP event kind does not match event ID")
+        return self
+
+
+class WfpEventBatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    log_generation: UUID
+    cursor_record_id: StrictInt = Field(ge=0, le=2**63 - 1)
+    status: Literal["STARTING", "ACTIVE", "GAP", "UNAVAILABLE"]
+    gap_reason: Literal["CURSOR_INVALID", "SECURITY_LOG_CLEARED", "SECURITY_LOG_ROLLOVER"] | None = None
+    error_code: StrictStr | None = Field(default=None, max_length=64, pattern=r"^[A-Z0-9_:-]+$")
+    events: list[WfpConnectionEventIn] = Field(default_factory=list, max_length=25)
+
+    @model_validator(mode="after")
+    def cursor_covers_events(self):
+        ids = [event.event_record_id for event in self.events]
+        if ids != sorted(set(ids)) or (ids and self.cursor_record_id < ids[-1]):
+            raise ValueError("WFP event IDs must be unique, ordered, and covered by the cursor")
+        if self.status == "GAP" and self.gap_reason is None:
+            raise ValueError("WFP gaps require a reason")
+        return self
 
 
 class PeripheralEntryIn(BaseModel):

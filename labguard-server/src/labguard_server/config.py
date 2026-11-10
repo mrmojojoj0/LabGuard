@@ -26,6 +26,7 @@ class Settings:
     software_inventory_retention_days: int = 90
     chocolatey_source_url: str | None = None
     software_job_max_runtime_seconds: int = 1800
+    ipinfo_token: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -51,6 +52,7 @@ class Settings:
             software_inventory_retention_days=int(os.getenv("SOFTWARE_INVENTORY_RETENTION_DAYS", "90")),
             chocolatey_source_url=os.getenv("CHOCOLATEY_SOURCE_URL") or None,
             software_job_max_runtime_seconds=int(os.getenv("SOFTWARE_JOB_MAX_RUNTIME_SECONDS", "1800")),
+            ipinfo_token=os.getenv("IPINFO_TOKEN") or None,
         )
 
     def validate(self) -> None:

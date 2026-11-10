@@ -73,5 +73,6 @@ Before production, terminate HTTPS/WSS at a trusted ingress using a valid, monit
 | `LABGUARD_SERVER_URL` | `http://127.0.0.1:8000` | Agent API/WebSocket base URL |
 | `LABGUARD_ALLOW_INSECURE_DEV` | unset | Must be `1` to allow agent HTTP/WS development mode |
 | `LABGUARD_STATE_DIR` | `%PROGRAMDATA%\LabGuard` | Agent identity directory |
+| `IPINFO_TOKEN` | unset | Optional server-side token for public-IP ASN lookups in Network Monitoring |
 
 For component install and admin bootstrap instructions, see each project's README.

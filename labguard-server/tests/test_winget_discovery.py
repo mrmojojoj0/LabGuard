@@ -101,7 +101,7 @@ def test_search_passes_arguments_separately_and_returns_version(monkeypatch):
     version, packages = discovery.search_winget_packages('VLC" & whoami')
     assert version == "v1.9.0"
     assert len(packages) == 2
-    assert calls[1][0][1:] == ["search", "--name", 'VLC" & whoami', "--source", "winget",
+    assert calls[1][0][1:] == ["search", 'VLC" & whoami', "--source", "winget",
                                "--count", "100", "--accept-source-agreements", "--disable-interactivity"]
     assert calls[1][1]["shell"] is False
 

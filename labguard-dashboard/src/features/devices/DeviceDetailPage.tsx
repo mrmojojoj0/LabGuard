@@ -229,7 +229,7 @@ export function DeviceDetailPage() {
           ) : tab === "Hardware" ? (
             <SystemTelemetry id={id} />
           ) : tab === "Network" ? (
-            <NetworkInterfaces data={telemetry.data?.snapshot} />
+            <NetworkInterfaces data={telemetry.data?.snapshot} deviceId={id} />
           ) : tab === "Remote Access" ? (
             canManageLabs(admin?.role) ? <DeviceRdpAccess deviceId={id} /> : <Panel><p className="p-4 text-[10px] text-[var(--color-muted)]">Remote Desktop access requires lab-admin access.</p></Panel>
           ) : tab === "Processes" ? (

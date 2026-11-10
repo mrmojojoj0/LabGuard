@@ -74,7 +74,7 @@ def locate_winget() -> str | None:
     return None
 
 
-def _run(executable: str, args: list[str]) -> subprocess.CompletedProcess:
+def _run(executable: str, args: list[str], *, allow_no_matches: bool = False) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(
             [executable, *args], capture_output=True, text=True,
@@ -85,6 +85,9 @@ def _run(executable: str, args: list[str]) -> subprocess.CompletedProcess:
     except (OSError, PermissionError) as exc:
         raise WingetDiscoveryError("winget_execution_failed", "WinGet could not be started by the server process") from exc
     if result.returncode != 0:
+        combined_output = f"{result.stdout}\n{result.stderr}"
+        if allow_no_matches and re.search(r"\bno\s+(?:package|results?|matches)\b", combined_output, re.IGNORECASE):
+            return subprocess.CompletedProcess(result.args, 0, stdout="No package found matching input criteria.", stderr="")
         raise WingetDiscoveryError("winget_command_failed", "WinGet reported a discovery command failure")
     return result
 
@@ -139,7 +142,7 @@ def parse_search_output(output: str, source: str = "winget") -> list[WingetPacka
                                           version=value_by_field.get("version") or None, source=package_source,
                                           publisher=value_by_field.get("publisher") or None))
         return packages
-    if re.search(r"no package found|no installed package found", output, re.IGNORECASE):
+    if re.search(r"\bno\s+(?:package|installed package|results?|matches)\b", output, re.IGNORECASE):
         return []
     raise WingetDiscoveryError("winget_unusable_output", "WinGet search output did not contain a recognized package table")
 
@@ -185,10 +188,43 @@ def search_winget_packages(query: str, source: str = "winget") -> tuple[str, lis
         raise WingetDiscoveryError("invalid_query", "Search text must contain 1 to 128 characters")
     version = get_winget_version()
     executable = locate_winget()
-    # The search text and source are individual arguments; input never becomes command text.
-    output = _run(executable, ["search", "--name", clean_query, "--source", normalized_source,
-                               "--count", "100", "--accept-source-agreements", "--disable-interactivity"]).stdout
-    return version, parse_search_output(output, normalized_source)
+    words = clean_query.split()
+    candidates = [clean_query]
+    if len(words) > 1:
+        # Try common package-name spellings for every multiword query.
+        for separator in ("::", "", ":", "-", "_"):
+            candidate = separator.join(words)
+            if candidate not in candidates and len(candidate) <= 128:
+                candidates.append(candidate)
+
+    first_search_error: WingetDiscoveryError | None = None
+    successful_search = False
+    matched: dict[str, WingetPackage] = {}
+    for candidate in candidates:
+        # Each query remains a single subprocess argument; input never becomes command text.
+        try:
+            output = _run(executable, ["search", candidate, "--source", normalized_source,
+                                      "--count", "100", "--accept-source-agreements",
+                                      "--disable-interactivity"], allow_no_matches=True).stdout
+        except WingetDiscoveryError as exc:
+            first_search_error = first_search_error or exc
+            continue
+        try:
+            packages = parse_search_output(output, normalized_source)
+        except WingetDiscoveryError as exc:
+            first_search_error = first_search_error or exc
+            continue
+        successful_search = True
+        for package in packages:
+            matched.setdefault(package.package_id.casefold(), package)
+            if len(matched) >= 100:
+                break
+        if len(matched) >= 100:
+            break
+    if (first_search_error is not None and not successful_search and not matched
+            and first_search_error.code != "winget_command_failed"):
+        raise first_search_error
+    return version, list(matched.values())
 
 
 def parse_show_output(output: str) -> dict[str, str | None]:

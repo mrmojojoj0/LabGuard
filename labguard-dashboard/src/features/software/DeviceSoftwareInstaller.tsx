@@ -15,6 +15,7 @@ export function DeviceSoftwareInstaller({ deviceId }: { deviceId: string }) {
   const toast = useToast();
   const qc = useQueryClient();
   const [query, setQuery] = useState("");
+  const [searchedQuery, setSearchedQuery] = useState("");
   const [scope, setScope] = useState<"MACHINE" | "USER">("MACHINE");
   const [selection, setSelection] = useState<Selection | null>(null);
   const [submittedJobId, setSubmittedJobId] = useState<string | null>(null);
@@ -76,13 +77,14 @@ export function DeviceSoftwareInstaller({ deviceId }: { deviceId: string }) {
     <Panel className="mb-4">
       <PanelTitle>Install software on this device</PanelTitle>
       <p className="mb-2 text-[9px] text-[var(--color-muted)]">Search the fixed WinGet community source, or choose an existing approved Chocolatey package.</p>
-      <form className="my-3 flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); search.mutate(query.trim()); }}>
+      <form className="my-3 flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); setSearchedQuery(query.trim()); search.mutate(query.trim()); }}>
         <input className={`${inputClass} min-w-64 flex-1`} aria-label="Device WinGet search" placeholder="Search package name" value={query} onChange={(event) => setQuery(event.target.value)} maxLength={128} required />
         <Button disabled={!query.trim() || search.isPending}>{search.isPending ? "Searching…" : "Search WinGet"}</Button>
+        {(query || search.data || search.isError) && <Button type="button" onClick={() => { setQuery(""); setSearchedQuery(""); search.reset(); }}>Clear</Button>}
       </form>
       {search.isError && <QueryError error={search.error} />}
       {search.data && <div className="divide-y divide-[var(--color-border)]" aria-live="polite">
-        {!search.data.results.length ? <p className="py-2 text-[10px] text-[var(--color-muted)]">No packages matched.</p> : search.data.results.map((pkg) => <div className="flex flex-wrap items-center justify-between gap-3 py-2" key={`${pkg.source}:${pkg.package_id}`}>
+        {!search.data.results.length ? <p className="py-2 text-[10px] text-[var(--color-muted)]">No packages found for “{searchedQuery}”.</p> : search.data.results.map((pkg) => <div className="flex flex-wrap items-center justify-between gap-3 py-2" key={`${pkg.source}:${pkg.package_id}`}>
           <span className="text-[10px] text-[var(--color-foreground)]">{pkg.name} <span className="text-[var(--color-muted)]">· {pkg.package_id} · {pkg.version || "Latest"}</span></span>
           <Button onClick={() => { setScope("MACHINE"); setSelection({ kind: "WINGET", pkg }); }}>Install</Button>
         </div>)}

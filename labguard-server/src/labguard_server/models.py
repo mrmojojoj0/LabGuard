@@ -116,6 +116,45 @@ class DeviceTelemetryLatest(Base):
     network_interfaces: Mapped[list] = mapped_column(JSON)
 
 
+class DeviceWfpEvent(Base):
+    __tablename__ = "device_wfp_events"
+    __table_args__ = (
+        UniqueConstraint("device_id", "log_generation", "event_record_id", name="uq_wfp_device_generation_record"),
+        Index("ix_wfp_device_occurred", "device_id", "occurred_at"),
+        Index("ix_wfp_occurred", "occurred_at"),
+        Index("ix_wfp_public_occurred", "remote_is_public", "occurred_at"),
+    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    log_generation: Mapped[str] = mapped_column(String(36))
+    event_record_id: Mapped[int] = mapped_column(BigInteger)
+    event_id: Mapped[int] = mapped_column(Integer)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    event_kind: Mapped[str] = mapped_column(String(32))
+    direction: Mapped[str] = mapped_column(String(16))
+    protocol: Mapped[str] = mapped_column(String(16))
+    protocol_number: Mapped[int] = mapped_column(Integer)
+    source_ip: Mapped[str] = mapped_column(String(45))
+    source_port: Mapped[int | None] = mapped_column(Integer)
+    destination_ip: Mapped[str] = mapped_column(String(45))
+    destination_port: Mapped[int | None] = mapped_column(Integer)
+    remote_ip: Mapped[str] = mapped_column(String(45))
+    remote_is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    process_id: Mapped[int | None] = mapped_column(BigInteger)
+    process_path: Mapped[str | None] = mapped_column(String(1024))
+
+
+class DeviceWfpState(Base):
+    __tablename__ = "device_wfp_states"
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True)
+    log_generation: Mapped[str | None] = mapped_column(String(36))
+    cursor_record_id: Mapped[int] = mapped_column(BigInteger, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="STARTING")
+    gap_reason: Mapped[str | None] = mapped_column(String(32))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
 class TelemetrySample(Base):
     __tablename__ = "telemetry_samples"
     __table_args__ = (Index("ix_telemetry_device_received", "device_id", "received_at"),)
