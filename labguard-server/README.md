@@ -61,7 +61,7 @@ Schema changes must be represented by Alembic revisions. Apply with alembic upgr
 python -m pytest
 ~~~
 
-The integration fixture uses SQLite and applies all Alembic migrations through 0010. PostgreSQL verification is environment-specific and has not been performed for migrations 0007–0010; use a disposable database before applying migrations to any shared environment. Client tests are in `../labguard-client/tests`; use its test extra to run them.
+The integration fixture uses SQLite and applies all Alembic migrations through head. PostgreSQL verification is environment-specific; use a disposable database before applying new migrations to any shared environment. Client tests are in `../labguard-client/tests`; use its test extra to run them.
 
 The WSS integration test launches a local Uvicorn server and two real AgentClient instances. For local plaintext HTTP only, the client requires the explicit `allow_insecure_dev=True` option or CLI `--insecure-dev` flag.
 
@@ -72,3 +72,5 @@ Administrator sessions are opaque, stored as hashes, expiring and revocable. Mut
 ## Process management
 
 LAB_ADMIN+ can request a bounded process snapshot or PID-and-creation-time-bound `TERMINATE`/`KILL` for an online endpoint. Migration 0010 stores process requests/results and admin audits. Typed WSS events carry commands and bounded responses. Process username/executable details are exposed only through LAB_ADMIN+ routes. No free-form commands are accepted. On Windows psutil `terminate()` uses `TerminateProcess`, so it does not guarantee an application save/close prompt.
+
+The Windows agent reports attached peripheral snapshots over the authenticated WSS session. Migration 0013 stores current presence and 90-day connect/disconnect history for USB peripherals, external USB drives, input devices, Bluetooth devices, cameras/scanners, printers, and modems. The device detail Peripheral activity tab shows current devices and history. The client hashes PnP identifiers and does not inspect drive contents.

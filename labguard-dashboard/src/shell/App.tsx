@@ -336,6 +336,10 @@ function AdminEventBridge() {
       void queryClient.invalidateQueries({ queryKey: ["telemetry-history"] });
       void queryClient.invalidateQueries({ queryKey: ["telemetry-summary"] });
     };
+    const refreshPeripherals = (event: MessageEvent<string>) => {
+      const data = JSON.parse(event.data) as { device_id?: string };
+      if (data.device_id) void queryClient.invalidateQueries({ queryKey: ["device-peripherals", data.device_id] });
+    };
     const refreshSoftware = (event: MessageEvent<string>) => {
       const data = JSON.parse(event.data) as { device_id?: string };
       void queryClient.invalidateQueries({ queryKey: ["software"] });
@@ -354,6 +358,7 @@ function AdminEventBridge() {
     stream.addEventListener("device.status", refresh);
     stream.addEventListener("device.connection", refresh);
     stream.addEventListener("device.telemetry", refreshTelemetry);
+    stream.addEventListener("device.peripherals", refreshPeripherals);
     stream.addEventListener("software.inventory", refreshSoftware);
     stream.addEventListener("software.job", refreshSoftwareJobs);
     const deviceDeleted = (event: MessageEvent<string>) => {

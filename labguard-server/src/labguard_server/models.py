@@ -132,6 +132,40 @@ class TelemetrySample(Base):
     disk_percent: Mapped[float | None] = mapped_column(Float)
 
 
+class DevicePeripheralSnapshot(Base):
+    __tablename__ = "device_peripheral_snapshots"
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class DevicePeripheral(Base):
+    __tablename__ = "device_peripherals"
+    __table_args__ = (Index("ix_device_peripherals_connected", "device_id", "connected"),)
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True)
+    device_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(256))
+    category: Mapped[str] = mapped_column(String(32))
+    is_storage: Mapped[bool] = mapped_column(Boolean, default=False)
+    connected: Mapped[bool] = mapped_column(Boolean, default=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class DevicePeripheralEvent(Base):
+    __tablename__ = "device_peripheral_events"
+    __table_args__ = (Index("ix_peripheral_events_device_time", "device_id", "occurred_at"),)
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    device_id: Mapped[UUID] = mapped_column(ForeignKey("devices.id", ondelete="CASCADE"), index=True)
+    device_key: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(256))
+    category: Mapped[str] = mapped_column(String(32))
+    is_storage: Mapped[bool] = mapped_column(Boolean, default=False)
+    action: Mapped[str] = mapped_column(String(16))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class SoftwareInventoryCollection(Base):
     __tablename__ = "software_inventory_collections"
     __table_args__ = (Index("ix_software_collection_device_started", "device_id", "started_at"),

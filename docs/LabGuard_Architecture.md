@@ -18,7 +18,7 @@ Audit records are written with their associated privileged database mutations. D
 
 ### Database and migrations
 
-Migration head is `0010_device_process_requests`, chained through 0001 foundation, 0002 device authentication/status, 0003 telemetry, 0004 software inventory, 0005 catalog/jobs, 0006 catalog review state, 0007 inventory source provenance, 0008 audited RDP requests, 0009 endpoint-reported RDP username, and 0010 authorized process requests/results. Migration 0008 stores RDP state and expiry; 0009 stores the detected username from the active console session; 0010 stores process operation state and bounded process details. Model definitions are in `labguard-server/src/labguard_server/models.py`. PostgreSQL migration execution has not been verified in this worktree.
+Migration head is `0013_peripheral_activity`, chained through 0001 foundation, 0002 device authentication/status, 0003 telemetry, 0004 software inventory, 0005 catalog/jobs, 0006 catalog review state, 0007 inventory source provenance, 0008 audited RDP requests, 0009 endpoint-reported RDP username, 0010 authorized process requests/results, 0011 telemetry usernames, 0012 network connection snapshots, and 0013 peripheral activity. Migration 0013 stores the current peripheral snapshot and bounded connect/disconnect history. Model definitions are in `labguard-server/src/labguard_server/models.py`. PostgreSQL migration execution has not been verified in this worktree.
 
 ### REST API
 
@@ -215,6 +215,10 @@ The client launches WinGet or Chocolatey with fixed argument arrays and `shell=F
 ## Authorized process inspection and termination
 
 LAB_ADMIN process requests use the existing authenticated device WebSocket and server-authorized REST APIs. The client enumerates at most 1,000 processes with bounded PID, name, CPU, memory, username, executable path, and creation-time fields. Large snapshots use typed batches; the server persists them in migration 0010 and exposes details only to LAB_ADMIN+. TERMINATE and KILL requests require both PID and creation time, are audited, and are revalidated by the agent immediately before signaling. Protected core processes and the agent itself are excluded. No shell, executable path, or arbitrary command is accepted. On Windows, psutil `terminate()` maps to `TerminateProcess` and is not an app-level graceful-close request; force kill remains a separate explicit action.
+
+## Peripheral activity
+
+The Windows agent periodically reports a bounded snapshot of attached USB peripherals, external USB drives, input devices, Bluetooth devices, cameras/scanners, printers, and modems over the existing authenticated WSS session. Device identity in this inventory is represented by a one-way hash of the PnP identifier; raw identifiers and drive contents are not collected. Migration 0013 stores current presence and a 90-day connect/disconnect history. The device detail tab shows current presence and recent changes. Polling detects changes while the agent is running; when the agent reconnects, the next complete snapshot reconciles current presence.
 
 ## WinGet inventory stabilization (2026-11-07)
 

@@ -20,8 +20,8 @@ def main():
     settings.validate()
     password = getpass("Administrator password: ")
     confirm = getpass("Confirm password: ")
-    if len(password) < 12 or password != confirm:
-        parser.error("Passwords must match and contain at least 12 characters")
+    if len(password) < 6 or password != confirm:
+        parser.error("Passwords must match and contain at least 6 characters")
     engine, factory = make_session_factory(settings.database_url)
     try:
         with factory.begin() as db:

@@ -295,6 +295,37 @@ class TelemetryNetworkConnection(BaseModel):
         return value
 
 
+class PeripheralEntryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    device_key: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    name: StrictStr = Field(min_length=1, max_length=256)
+    category: Literal["EXTERNAL_DRIVE", "USB_PERIPHERAL", "INPUT_DEVICE", "BLUETOOTH",
+                      "CAMERA_OR_SCANNER", "PRINTER", "MODEM"]
+    is_storage: StrictBool
+
+    @field_validator("name")
+    @classmethod
+    def printable_name(cls, value):
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError("Peripheral name must contain printable characters")
+        return value
+
+
+class PeripheralSnapshotIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    collected_at: datetime
+    peripherals: list[PeripheralEntryIn] = Field(max_length=256)
+
+    @model_validator(mode="after")
+    def valid_snapshot(self):
+        if self.collected_at.tzinfo is None:
+            raise ValueError("Peripheral snapshot timestamp must include a timezone")
+        keys = [item.device_key for item in self.peripherals]
+        if len(set(keys)) != len(keys):
+            raise ValueError("Peripheral snapshot keys must be unique")
+        return self
+
+
 class TelemetrySnapshotIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     collected_at: datetime

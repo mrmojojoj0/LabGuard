@@ -21,6 +21,7 @@ from labguard_server.services import (approve_device, audit, authenticate, creat
                                       create_device_challenge, delete_device, issue_device_ticket, save_layout, submit_enrollment,
                                       update_room)
 from labguard_server.telemetry import latest_telemetry, telemetry_history, telemetry_summary
+from labguard_server.peripheral_activity import peripheral_activity as get_peripheral_activity
 from labguard_server.software_inventory import (device_software_items, global_software_list, inventory_status,
                                                 software_installations, software_summary)
 from labguard_server.websocket import request_software_inventory_refresh
@@ -258,6 +259,12 @@ def device_telemetry_history(device_id: UUID, request: Request, limit: int = Que
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Device not found"})
     return {"device_id": str(device_id), "samples": telemetry_history(
         db, device_id, limit, request.app.state.settings.telemetry_retention_days)}
+
+
+@router.get("/devices/{device_id}/peripherals")
+def device_peripherals(device_id: UUID, limit: int = Query(default=100, ge=1, le=500),
+                       _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    return get_peripheral_activity(db, device_id, limit)
 
 
 @router.get("/telemetry/summary")

@@ -28,6 +28,7 @@ from labguard_client.software_management import (PackageManagerUnavailable, Soft
                                                  UnsupportedExecutionContext, execute_package_job)
 from labguard_client.rdp_access import cleanup_expired_rdp_access, prepare_rdp_access
 from labguard_client.process_control import MAX_PROCESSES, list_processes, terminate_process
+from labguard_client.peripherals import collect_peripherals
 
 
 class AgentClient:
@@ -265,12 +266,39 @@ class AgentClient:
                 except Exception as exc:
                     logger.exception("Process request failed (%s)", type(exc).__name__)
 
+        async def peripheral_snapshot_loop():
+            last_signature = None
+            last_sent_at = 0.0
+            while not stop.is_set():
+                try:
+                    peripherals = await asyncio.to_thread(collect_peripherals)
+                    if peripherals is not None:
+                        signature = json.dumps(peripherals, sort_keys=True, separators=(",", ":"))
+                        now = asyncio.get_running_loop().time()
+                        if signature != last_signature or now - last_sent_at >= 30:
+                            payload = {"collected_at": datetime.now(UTC).isoformat(),
+                                       "peripherals": peripherals}
+                            ack = await self._send_session_event(
+                                ws, "client.peripheral.snapshot", payload, pending, send_lock)
+                            if ack.get("accepted"):
+                                last_signature = signature
+                                last_sent_at = now
+                            else:
+                                logger.warning("Peripheral snapshot was rejected by server (%s)",
+                                               ack.get("reason", "unknown"))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Peripheral monitoring failed (%s)", type(exc).__name__)
+                if await self._wait_or_stop(stop, 5):
+                    break
+
         tasks = [asyncio.create_task(self._read_session_acks(ws, pending, inventory_requests, job_offers, rdp_requests, process_requests)),
                  asyncio.create_task(heartbeat_loop()), asyncio.create_task(telemetry_loop()),
                  asyncio.create_task(software_inventory_loop()),
                  asyncio.create_task(software_job_loop()), asyncio.create_task(rdp_access_loop()),
-                 asyncio.create_task(process_request_loop()),
-                 asyncio.create_task(stop.wait())]
+                 asyncio.create_task(process_request_loop()), asyncio.create_task(stop.wait()),
+                 asyncio.create_task(peripheral_snapshot_loop())]
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             if tasks[7] in done:

@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set "CLIENT_ROOT=C:\Users\sakin\OneDrive\Desktop\LabGuard\labguard-client"
+set "CLIENT_ROOT=C:\Users\sakin\Downloads\LabGuard\labguard-client"
 set "PYTHON=%CLIENT_ROOT%\.venv\Scripts\python.exe"
 set "SERVICE=LabGuardAgent"
 set "LOG=C:\ProgramData\LabGuard\labguard-agent.log"

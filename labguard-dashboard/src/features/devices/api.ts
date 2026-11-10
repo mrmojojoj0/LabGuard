@@ -5,6 +5,7 @@ import type {
   ProcessOperation,
   DeviceStatus,
   DeviceTelemetry,
+  PeripheralActivity,
   RdpAccessRequest,
   TelemetrySample,
   TelemetrySummary,
@@ -24,6 +25,8 @@ export const devicesApi = {
       }),
     ),
   telemetry: (id: string) => api<DeviceTelemetry>(`/devices/${id}/telemetry`),
+  peripherals: (id: string, limit = 100) =>
+    api<PeripheralActivity>(`/devices/${id}/peripherals?limit=${limit}`),
   telemetryHistory: (id: string, limit = 120) =>
     api<{ device_id: string; samples: TelemetrySample[] }>(
       `/devices/${id}/telemetry/history?limit=${limit}`,

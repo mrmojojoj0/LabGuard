@@ -16,5 +16,24 @@ if not exist "%SERVER%\.venv\Scripts\uvicorn.exe" (
   pause
   exit /b 1
 )
+if not exist "%SERVER%\.venv\Scripts\python.exe" (
+  echo Server Python environment is incomplete. See labguard-server\README.md.
+  pause
+  exit /b 1
+)
+pushd "%SERVER%" || (
+  echo Could not open the server project directory.
+  pause
+  exit /b 1
+)
+echo Applying database migrations...
+".venv\Scripts\python.exe" -m alembic upgrade head
+if errorlevel 1 (
+  echo Database migration failed. The server was not started.
+  popd
+  pause
+  exit /b 1
+)
+popd
 start "LabGuard Server %HOST%:%PORT%" /D "%SERVER%" "%SERVER%\.venv\Scripts\uvicorn.exe" labguard_server.main:app --env-file .env --host %HOST% --port %PORT%
 endlocal

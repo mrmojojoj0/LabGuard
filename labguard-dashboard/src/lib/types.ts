@@ -119,6 +119,31 @@ export interface DeviceTelemetry {
   stale: boolean;
   stale_after_seconds: number;
 }
+export interface PeripheralDevice {
+  device_key: string;
+  name: string;
+  category: string;
+  is_storage: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+export interface PeripheralEvent {
+  id: string;
+  device_key: string;
+  name: string;
+  category: string;
+  is_storage: boolean;
+  action: "CONNECTED" | "DISCONNECTED";
+  occurred_at: string;
+}
+export interface PeripheralActivity {
+  device_id: string;
+  observed_at: string | null;
+  stale: boolean;
+  stale_after_seconds: number;
+  connected: PeripheralDevice[];
+  events: PeripheralEvent[];
+}
 export interface TelemetrySample {
   collected_at: string;
   received_at: string;

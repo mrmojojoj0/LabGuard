@@ -61,7 +61,7 @@ Windows Service runtime behavior, actual DPAPI machine-scope migration, ACL enfo
 On Krypton, rebuild and update the service from elevated PowerShell. This uses the existing configuration and identity; HTTP installations still require the persisted development opt-in and the explicit install flag:
 
 ~~~powershell
-$ClientRoot = 'C:\Users\sakin\OneDrive\Desktop\LabGuard\labguard-client'
+$ClientRoot = 'C:\Users\sakin\Downloads\LabGuard\labguard-client'
 $AgentPython = Join-Path $ClientRoot '.venv\Scripts\python.exe'
 sc.exe stop LabGuardAgent
 Start-Sleep -Seconds 3
@@ -98,6 +98,10 @@ Inventory is sent over the existing ticket-authenticated WSS session as typed `c
 Manual Windows inventory verification: install and approve a disposable test device, start the service, and wait for its initial collection to appear in the dashboard. Compare a few entries against Windows Installed Apps or the uninstall registry. While the device is online, request a refresh from its Software tab and confirm the last-success time advances. To inspect per-user behavior, test once with a user hive loaded and once with it unloaded; loaded, accessible hives should be collected, unloaded profiles are omitted, and access-denied keys should appear as partial collection health. These checks require an actual Windows host and are not covered by the platform-independent unit suite.
 
 Inventory reconciliation merges only unambiguous WinGet/Registry pairs using exact package ID or normalized name plus equal publisher/version evidence. Known edition, version, publisher, architecture, scope, or package-ID conflicts keep rows separate. The preferred source is WinGet when it supplied the reliable package ID; `discovery_sources` preserves provenance. Unmatched and ambiguous Registry applications remain visible. This is covered by deterministic reconciliation tests; a live endpoint scan should confirm matches against its installed-app list.
+
+## Peripheral activity
+
+On Windows, the agent polls the local Plug and Play inventory and reports changes for attached USB devices, USB external drives, input devices, Bluetooth devices, cameras/scanners, printers, and modems over the authenticated WSS session. Polling runs every five seconds and sends a full snapshot on change and every 30 seconds. The agent sends a bounded display name, broad device class, and a one-way hash of the PnP identifier; it does not send the raw identifier, serial number, drive contents, or file activity. The server reconciles snapshots into current presence and a 90-day connect/disconnect history, shown in the device's Peripheral activity tab. Changes that occur while the agent is disconnected are reflected from the next complete snapshot, with server receipt time.
 
 ## Individual software jobs (v0.6)
 
