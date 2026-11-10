@@ -30,6 +30,11 @@ def list_processes(*, limit: int = MAX_PROCESSES) -> list[dict]:
                 info = process.info
                 created_at = info.get("create_time")
                 memory = info.get("memory_info")
+                created_at_us = _created_at_us(float(created_at)) if created_at is not None else None
+                # Windows pseudo/system processes can report an epoch creation time of zero.
+                # The server accepts unknown creation times as null, but rejects nonpositive values.
+                if created_at_us is not None and created_at_us <= 0:
+                    created_at_us = None
                 try:
                     process.cpu_percent(interval=None)
                 except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
@@ -41,7 +46,7 @@ def list_processes(*, limit: int = MAX_PROCESSES) -> list[dict]:
                     "executable_path": str(info["exe"])[:1024] if info.get("exe") else None,
                     "cpu_percent": None,
                     "memory_bytes": int(memory.rss) if memory is not None else None,
-                    "created_at_us": _created_at_us(float(created_at)) if created_at is not None else None,
+                    "created_at_us": created_at_us,
                 })
                 handles.append(process)
         except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess, OSError, ValueError):

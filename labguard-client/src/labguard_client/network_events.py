@@ -64,21 +64,18 @@ class WindowsSecurityEventSource:
         flags = win32evtlog.EvtQueryChannelPath | getattr(win32evtlog, "EvtQueryForwardDirection", 0x100)
         handle = win32evtlog.EvtQuery("Security", flags, query)
         records: list[WfpRecord] = []
-        try:
-            while len(records) < limit:
-                batch = win32evtlog.EvtNext(handle, min(128, limit - len(records)), 0, 0)
-                if not batch:
-                    break
-                for event in batch:
-                    try:
-                        xml_text = win32evtlog.EvtRender(event, win32evtlog.EvtRenderEventXml)
-                        record = parse_wfp_event(xml_text)
-                        if record is not None:
-                            records.append(record)
-                    finally:
-                        win32evtlog.EvtClose(event)
-        finally:
-            win32evtlog.EvtClose(handle)
+        while len(records) < limit:
+            batch = win32evtlog.EvtNext(handle, min(128, limit - len(records)), 0, 0)
+            if not batch:
+                break
+            for event in batch:
+                # Pywin32 wraps EVT_HANDLE values in PyEVT_HANDLE objects and
+                # calls EvtClose when each wrapper is released. This version
+                # of win32evtlog does not expose an EvtClose function.
+                xml_text = win32evtlog.EvtRender(event, win32evtlog.EvtRenderEventXml)
+                record = parse_wfp_event(xml_text)
+                if record is not None:
+                    records.append(record)
         records.sort(key=lambda item: item.event_record_id)
         return records
 
@@ -243,7 +240,7 @@ class WfpEventReader:
             except Exception as exc:
                 previous_status = self._status
                 self._status = "UNAVAILABLE"
-                self._error = type(exc).__name__
+                self._error = type(exc).__name__.upper()
                 self._status_due = self._status_due or previous_status != self._status
                 logger.warning("WFP event reader unavailable (%s)", self._error)
 

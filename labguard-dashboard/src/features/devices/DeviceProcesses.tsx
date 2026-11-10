@@ -103,6 +103,7 @@ export function DeviceProcesses({ deviceId }: { deviceId: string }) {
     {processList.isError && <QueryError error={processList.error} />}
     {processAction.isError && <QueryError error={processAction.error} />}
     {processList.data?.status === "FAILED" && <p role="alert" className="mb-2 text-[10px] text-red-700">{processResultMessage(processList.data.result_code)}</p>}
+    {processList.data?.status === "EXPIRED" && <p role="alert" className="mb-2 rounded border border-amber-500/50 bg-amber-500/5 p-3 text-[10px] text-amber-800 dark:text-amber-200">The process request timed out without a response. Confirm the LabGuard Agent is updated, running, and connected, then refresh the process list.</p>}
     {requestStatus === "PENDING" && <Loading label="Collecting process details…" />}
     {requestStatus === "COMPLETE" && processList.data?.result_code === "process_list_truncated" &&
       <p className="mb-2 text-[10px] text-amber-700">{processResultMessage(processList.data.result_code)}</p>}
