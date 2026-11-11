@@ -26,6 +26,8 @@ export interface CameraDetection {
 export const cameraApi = {
   list: (roomId?: string) => api<LabCamera[]>(`/lab-cameras${roomId ? `?room_id=${encodeURIComponent(roomId)}` : ""}`),
   detections: (roomId?: string) => api<CameraDetection[]>(`/lab-camera-detections?limit=200${roomId ? `&room_id=${encodeURIComponent(roomId)}` : ""}`),
+  deleteDetection: (id: string) => api<void>(`/lab-camera-detections/${id}`, { method: "DELETE" }),
+  clearDetections: (roomId?: string) => api<{ deleted_count: number }>(`/lab-camera-detections${roomId ? `?room_id=${encodeURIComponent(roomId)}` : ""}`, { method: "DELETE" }),
   create: (roomId: string, name: string, stream_uri: string) => api<LabCamera>(`/rooms/${roomId}/cameras`, json("POST", { name, stream_uri })),
   update: (id: string, changes: Partial<Pick<LabCamera, "name" | "enabled">> & { stream_uri?: string }) => api<LabCamera>(`/lab-cameras/${id}`, json("PATCH", changes)),
   remove: (id: string) => api<void>(`/lab-cameras/${id}`, { method: "DELETE" }),

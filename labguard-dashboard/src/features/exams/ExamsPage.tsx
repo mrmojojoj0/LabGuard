@@ -1,5 +1,5 @@
-import { useMemo, useState, type FormEvent } from "react";
-import { CalendarClock, Download, ShieldAlert } from "lucide-react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { CalendarClock, Download, ShieldAlert, X } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Empty, PageHeader, Panel, PanelTitle, QueryError, Skeleton, StatusBadge } from "../../components/ui";
 import { useAuth } from "../auth/AuthProvider";
@@ -28,6 +28,14 @@ export function ExamsPage() {
   const [eventsDeviceId, setEventsDeviceId] = useState<string | null>(null);
   const [renameDeviceId, setRenameDeviceId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  useEffect(() => {
+    if (!eventsDeviceId) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setEventsDeviceId(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [eventsDeviceId]);
   const selectedRoom = rooms.data?.find((room) => room.id === roomId);
   const layout = useQuery({ queryKey: ["room-layout", roomId], queryFn: () => roomsApi.layout(roomId), enabled: Boolean(roomId) });
   const assignedIds = useMemo(() => layout.data?.assignments.map((item) => item.device_id) ?? [], [layout.data]);
@@ -114,8 +122,9 @@ export function ExamsPage() {
           </span>
           <button type="button" onClick={() => setEventsDeviceId((current) => current === device.device_id ? null : device.device_id)}
             aria-expanded={eventsDeviceId === device.device_id}
+            aria-haspopup="dialog"
             className="mt-1 w-fit rounded border border-[var(--color-border)] px-1.5 py-1 font-semibold hover:bg-[var(--color-surface-muted)] print:hidden">
-            {eventsDeviceId === device.device_id ? "Hide events" : "View events"}
+            View events
           </button>
           {canManage && <button type="button" onClick={() => { setRenameDeviceId((current) => current === device.device_id ? null : device.device_id); setRenameValue(device.device_name); rename.reset(); }}
             className="ml-1 mt-1 w-fit rounded border border-[var(--color-border)] px-1.5 py-1 font-semibold hover:bg-[var(--color-surface-muted)] print:hidden">
@@ -132,19 +141,21 @@ export function ExamsPage() {
           <Button disabled={!renameValue.trim() || rename.isPending}>{rename.isPending ? "Saving…" : "Save name"}</Button>
           {rename.error && <span role="alert" className="text-[10px] text-red-700">{rename.error.message}</span>}
         </form>}
-        {eventsDeviceId && <section className="rounded-md border border-[var(--color-border)] p-3" aria-label="PC exam events">
-          <h3 className="m-0 text-xs font-bold">Events · {report.data.devices.find((item) => item.device_id === eventsDeviceId)?.device_name ?? "PC"}</h3>
-          {report.data.violations.filter((item) => item.device_id === eventsDeviceId).length ?
-            <div className="mt-2">{report.data.violations.filter((item) => item.device_id === eventsDeviceId).map((item) => <div key={item.id} className="flex flex-wrap items-center gap-2 border-t border-[var(--color-border)] py-2 text-[10px]">
-              <ShieldAlert size={13} /><time>{new Date(item.occurred_at).toLocaleString()}</time><strong>{item.kind}</strong><span>{item.severity}</span>
-              {typeof (item.details.remote_ip ?? item.details.name) === "string" && <span>{String(item.details.remote_ip ?? item.details.name)}</span>}
-              {Array.isArray(item.details.screenshot_capture_ids) && item.details.screenshot_capture_ids.length > 0 && <a href="/screenshots" className="underline">View evidence ({item.details.screenshot_capture_ids.length})</a>}
-            </div>)}</div> : <p className="mb-0 text-[10px] text-[var(--color-muted)]">No exam alerts recorded for this PC.</p>}
-        </section>}
         <h3 className="text-xs font-bold">Integrity alerts ({report.data.violations.length})</h3>{report.data.violations.map((item) => { const captureIds = item.details.screenshot_capture_ids; const captureId = item.details.screenshot_capture_id; const captureCount = Array.isArray(captureIds) ? captureIds.length : (typeof captureId === "string" ? 1 : 0); const detail = item.details.remote_ip ?? item.details.name; return <div key={item.id} className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)] py-2 text-[10px]"><ShieldAlert size={14} />{new Date(item.occurred_at).toLocaleString()} · {item.kind} · {item.severity} · {report.data!.devices.find((d) => d.device_id === item.device_id)?.device_name ?? item.device_id}{typeof detail === "string" && ` · ${detail}`}{captureCount > 0 && <> · <a href="/screenshots" className="underline">Evidence requested ({captureCount} captures)</a></>}</div>; })}
         <p className="text-[8px] text-[var(--color-muted)]">Generated {new Date(report.data.generated_at).toLocaleString()}. Use the browser print dialog to save as PDF.</p>
       </div>}
     </Panel>}
+    {eventsDeviceId && report.data && <div className="fixed inset-0 z-[100] grid place-items-center bg-slate-950/45 p-4 print:hidden" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setEventsDeviceId(null); }}>
+      <section className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-5 shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="exam-pc-events-title">
+        <div className="flex items-start justify-between gap-3"><div><p className="m-0 text-[9px] font-bold uppercase tracking-wider text-[var(--color-muted)]">EXAM PC EVENTS</p><h2 id="exam-pc-events-title" className="my-1 text-base font-bold">{report.data.devices.find((item) => item.device_id === eventsDeviceId)?.device_name ?? "PC"}</h2></div><button type="button" autoFocus className="rounded p-2 text-[var(--color-muted)] hover:bg-[var(--color-surface-muted)]" aria-label="Close PC events" onClick={() => setEventsDeviceId(null)}><X size={18} /></button></div>
+        {report.data.violations.filter((item) => item.device_id === eventsDeviceId).length ?
+          <div className="mt-3">{report.data.violations.filter((item) => item.device_id === eventsDeviceId).map((item) => <div key={item.id} className="flex flex-wrap items-center gap-2 border-t border-[var(--color-border)] py-3 text-[10px]">
+            <ShieldAlert size={13} /><time>{new Date(item.occurred_at).toLocaleString()}</time><strong>{item.kind}</strong><span>{item.severity}</span>
+            {typeof (item.details.remote_ip ?? item.details.name) === "string" && <span>{String(item.details.remote_ip ?? item.details.name)}</span>}
+            {Array.isArray(item.details.screenshot_capture_ids) && item.details.screenshot_capture_ids.length > 0 && <a href="/screenshots" className="underline">View evidence ({item.details.screenshot_capture_ids.length})</a>}
+          </div>)}</div> : <p className="mb-0 mt-3 text-[10px] text-[var(--color-muted)]">No exam alerts recorded for this PC.</p>}
+      </section>
+    </div>}
   </div>;
 }
 

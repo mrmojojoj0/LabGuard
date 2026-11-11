@@ -13,7 +13,7 @@ from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, distinct, func, select
 from sqlalchemy.orm import Session
 
 from labguard_server.models import LabCamera, LabCameraDetection, Room, now_utc
@@ -155,6 +155,22 @@ def delete_camera_evidence(settings, camera_id: UUID) -> None:
             path.unlink(missing_ok=True)
 
 
+def delete_unreferenced_camera_evidence(settings, db: Session, image_paths: set[str]) -> None:
+    root = _camera_evidence_root(settings)
+    pending = list(image_paths)
+    for start in range(0, len(pending), 500):
+        batch = pending[start:start + 500]
+        referenced = set(db.scalars(select(distinct(LabCameraDetection.image_path)).where(
+            LabCameraDetection.image_path.in_(batch))).all())
+        for stored_path in set(batch) - referenced:
+            path = Path(stored_path).expanduser().resolve()
+            if path.parent == root and path.suffix.lower() == ".jpg":
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    logger.exception("Could not delete camera evidence file %s", path.name)
+
+
 def camera_evidence_file(settings, detection: LabCameraDetection) -> Path | None:
     if detection.image_path is None or detection.occurred_at <= now_utc() - CAMERA_EVIDENCE_RETENTION:
         return None
@@ -279,7 +295,9 @@ def _sample_camera(application, camera_id: UUID) -> None:
                     .order_by(LabCameraDetection.occurred_at.desc()).limit(1))
                 if recent_evidence:
                     candidate = Path(recent_evidence)
-                    if candidate.is_file() and candidate.stat().st_mtime > (now - timedelta(minutes=1)).timestamp():
+                    if (candidate.resolve().parent == _camera_evidence_root(application.state.settings)
+                            and candidate.is_file()
+                            and candidate.stat().st_mtime > (now - timedelta(minutes=1)).timestamp()):
                         evidence_path = candidate
                 if evidence_path is None:
                     evidence_path = _save_evidence_frame(application.state.settings, camera.id, now, preview)

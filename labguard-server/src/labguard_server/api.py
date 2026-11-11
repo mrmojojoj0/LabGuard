@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import delete, distinct, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -48,7 +48,8 @@ from labguard_server.winget_discovery import (WingetDiscoveryError, get_winget_p
                                               get_winget_version, list_winget_sources, search_winget_packages)
 from labguard_server.exam_management import cancel_exam, create_exam, exam_out, list_exams
 from labguard_server.camera_monitoring import (camera_evidence_file, camera_out, create_camera,
-    delete_camera, delete_camera_evidence, list_cameras, list_detections, update_camera)
+    delete_camera, delete_camera_evidence, delete_unreferenced_camera_evidence,
+    list_cameras, list_detections, update_camera)
 
 router = APIRouter(prefix="/api/v1")
 _login_failures: dict[str, list[float]] = {}
@@ -900,6 +901,48 @@ def get_lab_camera_detection_image(detection_id: UUID, request: Request,
             "message": "The detected-object image is unavailable or has expired."})
     return FileResponse(image, media_type="image/jpeg", filename=f"LabGuard-camera-{detection_id}.jpg",
         headers={"Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff"})
+
+
+@router.delete("/lab-camera-detections/{detection_id}", status_code=204)
+def remove_lab_camera_detection(detection_id: UUID, request: Request,
+                                admin=Depends(require_role("LAB_ADMIN", csrf=True)),
+                                db: Session = Depends(get_db)):
+    detection = db.get(LabCameraDetection, detection_id)
+    if detection is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Detected item not found"})
+    details = {"camera_id": str(detection.camera_id), "room_id": str(detection.room_id), "label": detection.label}
+    image_paths = {detection.image_path} if detection.image_path else set()
+    room_id = str(detection.room_id)
+    db.delete(detection)
+    audit(db, admin.id, "lab_camera_detection.delete", "lab_camera_detection", str(detection_id), details)
+    db.commit()
+    delete_unreferenced_camera_evidence(request.app.state.settings, db, image_paths)
+    request.app.state.admin_events.publish({"type": "camera.detection.deleted", "detection_id": str(detection_id),
+        "room_id": room_id})
+    return Response(status_code=204)
+
+
+@router.delete("/lab-camera-detections")
+def clear_lab_camera_detections(request: Request, room_id: UUID | None = None, camera_id: UUID | None = None,
+                               admin=Depends(require_role("LAB_ADMIN", csrf=True)),
+                               db: Session = Depends(get_db)):
+    filters = []
+    if room_id is not None:
+        filters.append(LabCameraDetection.room_id == room_id)
+    if camera_id is not None:
+        filters.append(LabCameraDetection.camera_id == camera_id)
+    image_paths = set(db.scalars(select(distinct(LabCameraDetection.image_path)).where(
+        *filters, LabCameraDetection.image_path.is_not(None))).all())
+    result = db.execute(delete(LabCameraDetection).where(*filters))
+    deleted_count = result.rowcount or 0
+    audit(db, admin.id, "lab_camera_detection.clear", "lab_camera_detections", None,
+          {"room_id": str(room_id) if room_id else None, "camera_id": str(camera_id) if camera_id else None,
+           "deleted_count": deleted_count})
+    db.commit()
+    delete_unreferenced_camera_evidence(request.app.state.settings, db, image_paths)
+    request.app.state.admin_events.publish({"type": "camera.detections.cleared",
+        "room_id": str(room_id) if room_id else None, "camera_id": str(camera_id) if camera_id else None})
+    return {"deleted_count": deleted_count}
 
 
 @router.get("/rooms", response_model=list[RoomOut])

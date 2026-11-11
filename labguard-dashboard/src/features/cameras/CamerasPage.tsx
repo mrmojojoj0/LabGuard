@@ -14,7 +14,7 @@ export function CamerasPage() {
   const [name, setName] = useState("");
   const [streamUri, setStreamUri] = useState("");
   const cameras = useQuery({ queryKey: ["lab-cameras", roomId], queryFn: () => cameraApi.list(roomId || undefined), refetchInterval: 5_000 });
-  const detections = useQuery({ queryKey: ["lab-camera-detections", roomId], queryFn: () => cameraApi.detections(roomId || undefined), refetchInterval: 5_000 });
+  const detections = useQuery({ queryKey: ["lab-camera-detections", roomId], queryFn: () => cameraApi.detections(roomId || undefined), refetchInterval: 500 });
   const refresh = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["lab-cameras"] }),
@@ -24,6 +24,8 @@ export function CamerasPage() {
   const create = useMutation({ mutationFn: () => cameraApi.create(roomId, name.trim(), streamUri.trim()), onSuccess: async () => { setName(""); setStreamUri(""); await refresh(); } });
   const update = useMutation({ mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => cameraApi.update(id, { enabled }), onSuccess: refresh });
   const remove = useMutation({ mutationFn: cameraApi.remove, onSuccess: refresh });
+  const deleteDetection = useMutation({ mutationFn: cameraApi.deleteDetection, onSuccess: refresh });
+  const clearDetections = useMutation({ mutationFn: () => cameraApi.clearDetections(roomId || undefined), onSuccess: refresh });
   const canManage = admin?.role === "LAB_ADMIN" || admin?.role === "SUPER_ADMIN";
   const submit = (event: FormEvent) => { event.preventDefault(); if (roomId && name.trim() && streamUri.trim()) create.mutate(); };
 
@@ -61,11 +63,13 @@ export function CamerasPage() {
       </form>
     </Panel>}
 
-    <Panel><PanelTitle>Detected items</PanelTitle>
+    <Panel><PanelTitle aside={<div className="flex items-center gap-2"><span className="text-[9px] text-[var(--color-muted)]">Refreshes every 0.5 seconds</span>{canManage && !!detections.data?.length && <Button className="text-red-600" disabled={clearDetections.isPending} onClick={() => { const scope = roomId ? rooms.data?.find((room) => room.id === roomId)?.name : "all labs"; if (window.confirm(`Delete all detected items for ${scope}?`)) clearDetections.mutate(); }}>{clearDetections.isPending ? "Deleting…" : `Clear ${roomId ? "lab" : "all"}`}</Button>}</div>}>Detected items</PanelTitle>
+      {(deleteDetection.error || clearDetections.error) && <QueryError error={deleteDetection.error ?? clearDetections.error} />}
       {detections.isLoading ? <Skeleton rows={4} /> : detections.data?.length ? <div className="mt-2 divide-y divide-[var(--color-border)]">{detections.data.map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 py-2 text-[10px]">
         {item.image_available && <a href={cameraApi.evidenceUrl(item.id)} target="_blank" rel="noreferrer" title="Open saved detection frame"><img src={cameraApi.evidenceUrl(item.id)} alt={`Saved frame showing detected ${item.label}`} loading="lazy" className="h-16 w-24 rounded border border-[var(--color-border)] bg-black object-contain" /></a>}
         <div className="min-w-48 flex-1"><strong className="capitalize">{item.label}</strong><span className="text-[var(--color-muted)]"> · {item.camera_name} · {item.room_name}</span><span className="ml-1">× {item.count}</span>{item.image_available && <span className="ml-2 text-[var(--color-muted)]">Image retained for 24h</span>}</div>
         <span className="text-[var(--color-muted)]">{Math.round(item.confidence * 100)}% · {new Date(item.occurred_at).toLocaleString()}</span>
+        {canManage && <Button aria-label={`Delete ${item.label} detection`} title="Delete this detected item" className="text-red-600" disabled={deleteDetection.isPending} onClick={() => deleteDetection.mutate(item.id)}><Trash2 size={12} /></Button>}
       </div>)}</div> : <Empty title="No target items detected" detail="Detection history appears here when a configured camera sees supported objects." />}
     </Panel>
     <p className="mt-3 text-[9px] text-[var(--color-muted)]">This detector flags visible bottles, cups, bowls, and selected food classes. It cannot tell whether a cup contains coffee or another drink, and detections can be wrong. No faces or identities are analyzed.</p>
