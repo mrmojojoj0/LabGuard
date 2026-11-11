@@ -14,7 +14,7 @@ from labguard_server.db import get_db
 from labguard_server.models import (AuditEvent, Device, DeviceAuthChallenge, DeviceCredential, DevicePosition,
                                     DeviceProcessRequest, DeviceStatus, DeviceStatusEvent, RdpAccessRequest, Room,
                                     SoftwareCatalogPackage, SoftwareJob, ScreenshotCapture, Exam, ExamViolation,
-                                    LabCamera, now_utc)
+                                    LabCamera, LabCameraDetection, now_utc)
 from labguard_server.schemas import (DeviceApproval, DeviceChallengeRequest, DeviceOut, DeviceRename, DeviceTicketRequest, EnrollmentCodeOut, EnrollmentRequestIn,
                                      LayoutOut, LoginRequest, RoomCreate, RoomLayout, RoomOut, RoomPatch,
                                      RdpAccessRequestOut, SoftwareCatalogPackageCreate, SoftwareJobCreate,
@@ -47,8 +47,8 @@ from pathlib import Path as FilePath
 from labguard_server.winget_discovery import (WingetDiscoveryError, get_winget_package_metadata,
                                               get_winget_version, list_winget_sources, search_winget_packages)
 from labguard_server.exam_management import cancel_exam, create_exam, exam_out, list_exams
-from labguard_server.camera_monitoring import (camera_out, create_camera, delete_camera, list_cameras,
-    list_detections, update_camera)
+from labguard_server.camera_monitoring import (camera_evidence_file, camera_out, create_camera,
+    delete_camera, delete_camera_evidence, list_cameras, list_detections, update_camera)
 
 router = APIRouter(prefix="/api/v1")
 _login_failures: dict[str, list[float]] = {}
@@ -875,6 +875,7 @@ def remove_lab_camera(camera_id: UUID, request: Request, admin=Depends(require_r
     audit(db, admin.id, "lab_camera.delete", "lab_camera", str(camera_id),
           {"room_id": str(camera.room_id), "name": camera.name})
     request.app.state.camera_frames.pop(camera_id, None)
+    delete_camera_evidence(request.app.state.settings, camera_id)
     delete_camera(db, camera)
     db.commit()
     request.app.state.admin_events.publish({"type": "camera.updated", "camera_id": str(camera_id),
@@ -887,6 +888,18 @@ def get_lab_camera_detections(room_id: UUID | None = None, camera_id: UUID | Non
                               limit: int = Query(default=100, ge=1, le=500),
                               _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
     return list_detections(db, room_id, camera_id, limit)
+
+
+@router.get("/lab-camera-detections/{detection_id}/image")
+def get_lab_camera_detection_image(detection_id: UUID, request: Request,
+                                   _admin=Depends(require_role("VIEWER")), db: Session = Depends(get_db)):
+    detection = db.get(LabCameraDetection, detection_id)
+    image = camera_evidence_file(request.app.state.settings, detection) if detection is not None else None
+    if image is None:
+        raise HTTPException(status_code=404, detail={"code": "camera_evidence_unavailable",
+            "message": "The detected-object image is unavailable or has expired."})
+    return FileResponse(image, media_type="image/jpeg", filename=f"LabGuard-camera-{detection_id}.jpg",
+        headers={"Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff"})
 
 
 @router.get("/rooms", response_model=list[RoomOut])

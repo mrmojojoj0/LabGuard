@@ -370,6 +370,7 @@ class LabCameraDetection(Base):
     count: Mapped[int] = mapped_column(Integer, default=1)
     confidence: Mapped[float] = mapped_column(Float)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
+    image_path: Mapped[str | None] = mapped_column(Text)
 
 
 class DevicePosition(Base):

@@ -1,8 +1,11 @@
 """Room-scoped RTSP sampling and privacy-preserving object detection."""
 import asyncio
 import base64
+import getpass
 import hashlib
 import logging
+import os
+import subprocess
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -16,6 +19,8 @@ from sqlalchemy.orm import Session
 from labguard_server.models import LabCamera, LabCameraDetection, Room, now_utc
 
 logger = logging.getLogger("labguard_server.cameras")
+CAMERA_EVIDENCE_RETENTION = timedelta(hours=24)
+_secured_evidence_roots: set[Path] = set()
 
 # COCO dataset category IDs used by the ONNX Model Zoo SSD-MobileNetV1 weights.
 TARGET_CLASSES = {
@@ -107,7 +112,73 @@ def list_detections(db: Session, room_id: UUID | None = None, camera_id: UUID | 
         query = query.where(LabCameraDetection.camera_id == camera_id)
     return [{"id": event.id, "camera_id": camera.id, "room_id": room.id, "camera_name": camera.name,
         "room_name": room.name, "label": event.label, "count": event.count, "confidence": event.confidence,
-        "occurred_at": event.occurred_at} for event, camera, room in db.execute(query.limit(limit)).all()]
+        "occurred_at": event.occurred_at, "image_available": event.image_path is not None
+        and event.occurred_at > now_utc() - CAMERA_EVIDENCE_RETENTION
+        } for event, camera, room in db.execute(query.limit(limit)).all()]
+
+
+def _camera_evidence_root(settings) -> Path:
+    root = Path(settings.camera_evidence_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    if root not in _secured_evidence_roots:
+        if os.name == "nt":
+            grants = [f"{getpass.getuser()}:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"]
+            result = subprocess.run(["icacls.exe", str(root), "/inheritance:r", "/grant:r", *grants],
+                capture_output=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if result.returncode != 0:
+                raise RuntimeError("Could not restrict camera evidence storage permissions")
+        else:
+            os.chmod(root, 0o700)
+        _secured_evidence_roots.add(root)
+    return root
+
+
+def _save_evidence_frame(settings, camera_id: UUID, occurred_at, image: bytes) -> Path:
+    root = _camera_evidence_root(settings)
+    filename = f"{camera_id}_{occurred_at.strftime('%Y%m%dT%H%M%S%fZ')}.jpg"
+    final = root / filename
+    partial = root / f"{filename}.part"
+    if final.parent != root or partial.parent != root:
+        raise RuntimeError("camera_evidence_path_invalid")
+    with partial.open("xb") as stream:
+        stream.write(image)
+        stream.flush()
+        os.fsync(stream.fileno())
+    partial.replace(final)
+    return final
+
+
+def delete_camera_evidence(settings, camera_id: UUID) -> None:
+    root = _camera_evidence_root(settings)
+    for path in root.glob(f"{camera_id}_*.jpg"):
+        if path.resolve().parent == root:
+            path.unlink(missing_ok=True)
+
+
+def camera_evidence_file(settings, detection: LabCameraDetection) -> Path | None:
+    if detection.image_path is None or detection.occurred_at <= now_utc() - CAMERA_EVIDENCE_RETENTION:
+        return None
+    root = _camera_evidence_root(settings)
+    path = Path(detection.image_path).expanduser().resolve()
+    return path if path.parent == root and path.is_file() else None
+
+
+def purge_camera_evidence(settings) -> None:
+    root = _camera_evidence_root(settings)
+    cutoff = (now_utc() - CAMERA_EVIDENCE_RETENTION).timestamp()
+    for path in root.glob("*.jpg"):
+        try:
+            if path.stat().st_mtime <= cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Could not purge expired camera evidence file %s", path.name)
+    partial_cutoff = now_utc().timestamp() - 3600
+    for path in root.glob("*.jpg.part"):
+        try:
+            if path.stat().st_mtime <= partial_cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Could not purge abandoned camera evidence file %s", path.name)
 
 
 def _detect_frame(application, encrypted_uri: str) -> tuple[list[tuple[str, int, float]], bytes]:
@@ -198,6 +269,26 @@ def _sample_camera(application, camera_id: UUID) -> None:
             db.commit()
             return
         now = now_utc()
+        evidence_path = None
+        if detections:
+            try:
+                recent_evidence = db.scalar(select(LabCameraDetection.image_path).where(
+                    LabCameraDetection.camera_id == camera.id,
+                    LabCameraDetection.image_path.is_not(None),
+                    LabCameraDetection.occurred_at >= now - timedelta(minutes=1))
+                    .order_by(LabCameraDetection.occurred_at.desc()).limit(1))
+                if recent_evidence:
+                    candidate = Path(recent_evidence)
+                    if candidate.is_file() and candidate.stat().st_mtime > (now - timedelta(minutes=1)).timestamp():
+                        evidence_path = candidate
+                if evidence_path is None:
+                    evidence_path = _save_evidence_frame(application.state.settings, camera.id, now, preview)
+            except Exception:
+                camera.state, camera.error_code = "ERROR", "camera_evidence_storage_failed"
+                application.state.camera_frames.pop(camera.id, None)
+                db.commit()
+                logger.exception("Camera evidence could not be saved camera_id=%s", camera.id)
+                return
         camera.state, camera.error_code, camera.last_frame_at = "ONLINE", None, now
         application.state.camera_frames[camera.id] = (now, preview)
         for label, count, confidence in detections:
@@ -207,9 +298,11 @@ def _sample_camera(application, camera_id: UUID) -> None:
                 .order_by(LabCameraDetection.occurred_at.desc()).limit(1))
             if prior:
                 prior.count, prior.confidence, prior.occurred_at = count, confidence, now
+                prior.image_path = str(evidence_path) if evidence_path else None
             else:
                 db.add(LabCameraDetection(camera_id=camera.id, room_id=camera.room_id,
-                    label=label, count=count, confidence=confidence, occurred_at=now))
+                    label=label, count=count, confidence=confidence, occurred_at=now,
+                    image_path=str(evidence_path) if evidence_path else None))
         db.execute(delete(LabCameraDetection).where(
             LabCameraDetection.occurred_at < now - timedelta(days=application.state.settings.camera_event_retention_days)))
         db.commit()
@@ -244,6 +337,15 @@ async def lab_camera_monitor(application) -> None:
         except Exception:
             logger.exception("Camera monitor reconciliation failed")
             await asyncio.sleep(5)
+
+
+async def camera_evidence_retention_monitor(application) -> None:
+    while True:
+        try:
+            await asyncio.to_thread(purge_camera_evidence, application.state.settings)
+        except Exception:
+            logger.exception("Camera evidence retention cleanup failed")
+        await asyncio.sleep(60)
 
 
 async def _camera_loop(application, camera_id: UUID) -> None:

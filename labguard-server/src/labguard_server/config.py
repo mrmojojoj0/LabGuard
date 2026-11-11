@@ -31,6 +31,7 @@ class Settings:
     screenshot_storage_dir: str = "data/screenshots"
     camera_encryption_key: str | None = None
     camera_detection_model: str = "data/models/ssd_mobilenet_v1_12.onnx"
+    camera_evidence_dir: str = str(Path(__file__).resolve().parents[2] / "data" / "camera-evidence")
     camera_sample_interval_seconds: int = 10
     camera_event_retention_days: int = 30
 
@@ -63,6 +64,8 @@ class Settings:
                 str(Path(__file__).resolve().parents[2] / "data" / "screenshots")),
             camera_encryption_key=os.getenv("CAMERA_ENCRYPTION_KEY") or None,
             camera_detection_model=os.getenv("CAMERA_DETECTION_MODEL", "data/models/ssd_mobilenet_v1_12.onnx"),
+            camera_evidence_dir=os.getenv("CAMERA_EVIDENCE_DIR",
+                str(Path(__file__).resolve().parents[2] / "data" / "camera-evidence")),
             camera_sample_interval_seconds=int(os.getenv("CAMERA_SAMPLE_INTERVAL_SECONDS", "10")),
             camera_event_retention_days=int(os.getenv("CAMERA_EVENT_RETENTION_DAYS", "30")),
         )
