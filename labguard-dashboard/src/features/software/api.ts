@@ -71,4 +71,8 @@ export const softwareApi = {
   jobs: (deviceId?: string) => api<SoftwareJobsPage>(
     deviceId ? `/devices/${deviceId}/software/jobs?limit=100` : "/software/jobs?limit=100",
   ),
+  clearJobs: (deviceId?: string) => api<{ deleted_count: number }>(
+    `/software/jobs${deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : ""}`,
+    json("DELETE"),
+  ),
 };

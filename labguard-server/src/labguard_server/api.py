@@ -36,7 +36,7 @@ from labguard_server.websocket import request_software_inventory_refresh
 from labguard_server.websocket import send_rdp_access_request
 from labguard_server.rdp_access import create_rdp_access_request, expire_rdp_request, rdp_request_out
 from labguard_server.software_jobs import (catalog_out, create_software_job, dispatch_software_job,
-                                           job_out)
+                                           job_out, clear_terminal_software_jobs)
 from labguard_server.process_management import (create_process_request, expire_process_request,
                                                 process_request_out)
 from labguard_server.websocket import send_process_request
@@ -764,6 +764,25 @@ def list_software_jobs(status: str | None = Query(default=None, pattern=r"^(PEND
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     jobs = db.scalars(query.order_by(SoftwareJob.created_at.desc()).offset(offset).limit(limit)).all()
     return {"items": [job_out(job) for job in jobs], "total": total, "offset": offset, "limit": limit}
+
+
+@router.delete("/software/jobs")
+def delete_terminal_software_jobs(request: Request, device_id: UUID | None = None,
+                                  admin=Depends(require_role("LAB_ADMIN", csrf=True)),
+                                  db: Session = Depends(get_db)):
+    if device_id is None and admin.role != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail={"code": "super_admin_required",
+            "message": "Only a Super Admin can clear job history across all devices."})
+    if device_id is not None and db.get(Device, device_id) is None:
+        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Device not found."})
+    deleted_count = clear_terminal_software_jobs(db, device_id=device_id)
+    audit(db, admin.id, "software.jobs_cleared", "software_job_history",
+          str(device_id) if device_id else "all_devices", {"deleted_count": deleted_count,
+          "scope": "device" if device_id else "all_devices", "terminal_only": True})
+    db.commit()
+    request.app.state.admin_events.publish({"type": "software.job", "cleared": True,
+        "device_id": str(device_id) if device_id else None})
+    return {"deleted_count": deleted_count}
 
 
 @router.get("/devices/{device_id}/software/jobs")

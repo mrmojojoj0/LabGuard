@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Loading, PageHeader, Panel, PanelTitle, QueryError } from "../../components/ui";
+import { Trash2 } from "lucide-react";
 import { useToast } from "../../components/Toast";
 import { useAuth } from "../auth/AuthProvider";
 import { canManageLabs } from "../auth/api";
 import { devicesApi } from "../devices/api";
 import { roomsApi } from "../rooms/api";
 import { softwareApi } from "./api";
+import { displayJobProgressMessage } from "./jobProgress";
 import type { SoftwareCatalogPackage, WingetDiscoveryResult } from "../../lib/types";
 
 const selectClass = "h-9 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-[10px] text-[var(--color-foreground)]";
@@ -79,6 +81,14 @@ export function SoftwareDeploymentPage() {
     },
     onError: (error: Error) => toast("Installation was not queued. " + error.message, "error"),
   });
+  const clearJobs = useMutation({
+    mutationFn: () => softwareApi.clearJobs(),
+    onSuccess: ({ deleted_count }) => {
+      void qc.invalidateQueries({ queryKey: ["software-jobs"] });
+      toast(`Cleared ${deleted_count} finished software job${deleted_count === 1 ? "" : "s"} across all devices.`);
+    },
+    onError: (error: Error) => toast(`Could not clear software job history. ${error.message}`, "error"),
+  });
   const submittedJobsReady = submittedJobs.filter(({ id }) => jobs.data?.items.some((job) => job.id === id && job.status === "SUCCEEDED"));
   useEffect(() => {
     for (const job of submittedJobsReady) {
@@ -119,7 +129,7 @@ export function SoftwareDeploymentPage() {
         </div>)}</div>}
     </Panel>}
     <Panel>
-      <PanelTitle>Deployment jobs <span className="text-[9px] font-normal text-[var(--color-muted)]">{jobs.data?.total ?? 0} recent</span></PanelTitle>
+      <PanelTitle aside={admin?.role === "SUPER_ADMIN" ? <Button disabled={clearJobs.isPending || !(jobs.data?.total ?? 0)} onClick={() => { if (window.confirm("Clear finished software job history across all devices? Active jobs will remain.")) clearJobs.mutate(); }}><Trash2 size={13}/>{clearJobs.isPending ? "Clearing…" : "Clear finished jobs"}</Button> : undefined}>Deployment jobs <span className="text-[9px] font-normal text-[var(--color-muted)]">{jobs.data?.total ?? 0} recent</span></PanelTitle>
       {batchSummary && <p role="status" className="mt-2 rounded-lg bg-[var(--color-surface-subtle)] p-2 text-[10px] text-[var(--color-foreground)]">Last batch: {batchSummary}</p>}
       {jobs.isError && <QueryError error={jobs.error} />}
       {jobs.isLoading ? <Loading label="Loading deployment jobs…" /> : !jobs.data?.items.length ? <p className="pt-3 text-[10px] text-[var(--color-muted)]">No deployment jobs have been requested.</p> :
@@ -130,7 +140,7 @@ export function SoftwareDeploymentPage() {
             <td className="px-2 py-3 text-[var(--color-muted)]">{names.get(job.device_id) ?? job.device_id}</td>
             <td className="px-2 py-3 text-[var(--color-muted)]">{job.action}</td>
             <td className="px-2 py-3 text-[var(--color-foreground)]">{job.status}</td>
-            <td className="px-2 py-3 text-[var(--color-muted)]">{job.progress_percent}% {job.progress_message ?? ""}</td>
+            <td className="px-2 py-3 text-[var(--color-muted)]">{job.progress_percent}% {displayJobProgressMessage(job.status, job.progress_message)}</td>
             <td className="px-2 py-3 text-[var(--color-muted)]">{job.started_at ? new Date(job.started_at).toLocaleString() : "—"}</td>
             <td className="px-2 py-3 text-[var(--color-muted)]">{job.completed_at ? new Date(job.completed_at).toLocaleString() : "—"}</td>
             <td className="px-2 py-3 text-[var(--color-muted)]">{job.error_message || job.result_summary || job.result_code || "—"}</td>

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Search } from "lucide-react";
+import { Search, Trash2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button, Loading, Panel, PanelTitle, QueryError } from "../../components/ui";
 import { useToast } from "../../components/Toast";
@@ -8,6 +8,7 @@ import { useAuth } from "../auth/AuthProvider";
 import { canManageLabs } from "../auth/api";
 import type { SoftwareCatalogPackage } from "../../lib/types";
 import { softwareApi } from "./api";
+import { displayJobProgressMessage } from "./jobProgress";
 
 type Selection = { action: "INSTALL"; pkg: SoftwareCatalogPackage };
 const selectClass = "h-9 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-[10px] text-[var(--color-foreground)]";
@@ -47,6 +48,15 @@ export function SoftwareManagementControls({ id }: { id: string }) {
     onError: (error: Error) => toast("Package could not be imported. " + error.message, "error"),
   });
   const jobs = useQuery({ queryKey: ["software-jobs", id], queryFn: () => softwareApi.jobs(id), refetchInterval: 3000 });
+  const clearJobs = useMutation({
+    mutationFn: () => softwareApi.clearJobs(id),
+    onSuccess: ({ deleted_count }) => {
+      void qc.invalidateQueries({ queryKey: ["software-jobs", id] });
+      void qc.invalidateQueries({ queryKey: ["software-jobs"] });
+      toast(`Cleared ${deleted_count} finished software job${deleted_count === 1 ? "" : "s"}.`);
+    },
+    onError: (error: Error) => toast(`Could not clear software job history. ${error.message}`, "error"),
+  });
   const createJob = useMutation({
     mutationFn: (body: Parameters<typeof softwareApi.createJob>[1]) => softwareApi.createJob(id, body),
     onSuccess: () => {
@@ -122,7 +132,7 @@ export function SoftwareManagementControls({ id }: { id: string }) {
         </div>)}</div>}
     </Panel>
     <Panel className="mt-4">
-      <PanelTitle>Software jobs <span className="text-[9px] font-normal text-[var(--color-muted)]">{jobs.data?.total ?? 0}</span></PanelTitle>
+      <PanelTitle aside={canManage ? <Button disabled={clearJobs.isPending || !(jobs.data?.items.some((job) => ["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"].includes(job.status)))} onClick={() => { if (window.confirm("Clear finished software job history for this device? Active jobs will remain.")) clearJobs.mutate(); }}><Trash2 size={13}/>{clearJobs.isPending ? "Clearing…" : "Clear finished jobs"}</Button> : undefined}>Software jobs <span className="text-[9px] font-normal text-[var(--color-muted)]">{jobs.data?.total ?? 0}</span></PanelTitle>
       {jobs.isError && <QueryError error={jobs.error} />}
       {jobs.isLoading ? <Loading label="Loading software jobs…" /> : !jobs.data?.items.length ?
         <p className="pt-3 text-[10px] text-[var(--color-muted)]">No software jobs for this device.</p> :
@@ -131,7 +141,7 @@ export function SoftwareManagementControls({ id }: { id: string }) {
           <tbody>{jobs.data.items.map((job) => <tr className="border-b border-[var(--color-border)] last:border-0" key={job.id}>
             <td className="px-2 py-3 font-semibold text-[var(--color-foreground)]">{approved.find((pkg) => pkg.id === job.catalog_package_id)?.display_name ?? job.package_id}</td>
             <td className="px-2 py-3 text-[var(--color-muted)]">{job.action}</td><td className="px-2 py-3 text-[var(--color-foreground)]">{job.status}</td>
-            <td className="px-2 py-3 text-[var(--color-muted)]">{job.progress_percent}% {job.progress_message || ""}</td>
+            <td className="px-2 py-3 text-[var(--color-muted)]">{job.progress_percent}% {displayJobProgressMessage(job.status, job.progress_message)}</td>
             <td className="px-2 py-3 text-[var(--color-muted)]">{job.started_at ? new Date(job.started_at).toLocaleString() : "—"}</td>
             <td className="px-2 py-3 text-[var(--color-muted)]">{job.error_message || job.result_summary || job.result_code || "—"}</td>
           </tr>)}</tbody>

@@ -4,6 +4,7 @@ import { Button, Loading, Panel, PanelTitle, QueryError } from "../../components
 import { useToast } from "../../components/Toast";
 import type { SoftwareCatalogPackage, WingetDiscoveryResult } from "../../lib/types";
 import { softwareApi } from "./api";
+import { displayJobProgressMessage } from "./jobProgress";
 
 type Selection =
   | { kind: "WINGET"; pkg: WingetDiscoveryResult }
@@ -103,7 +104,7 @@ export function DeviceSoftwareInstaller({ deviceId }: { deviceId: string }) {
       {jobs.isLoading ? <Loading label="Loading device software jobs…" /> : !jobs.data?.items.length ? <p className="pt-2 text-[10px] text-[var(--color-muted)]">No software jobs for this device.</p> : <div className="divide-y divide-[var(--color-border)]">
         {jobs.data.items.slice(0, 5).map((job) => <div className="flex flex-wrap justify-between gap-2 py-2 text-[10px]" key={job.id}>
           <span className="font-semibold text-[var(--color-foreground)]">{job.action} {job.package_id}</span>
-          <span className="text-[var(--color-muted)]">{job.status} · {job.progress_percent}%{job.progress_message ? ` · ${job.progress_message}` : ""}{job.error_message ? ` · ${job.error_message}` : ""}</span>
+          <span className="text-[var(--color-muted)]">{job.status} · {job.progress_percent}%{displayJobProgressMessage(job.status, job.progress_message) ? ` · ${displayJobProgressMessage(job.status, job.progress_message)}` : ""}{job.error_message ? ` · ${job.error_message}` : job.status === "SUCCEEDED" ? ` · ${job.result_summary ?? ""}` : ""}</span>
         </div>)}
       </div>}
     </Panel>

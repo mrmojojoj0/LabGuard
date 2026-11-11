@@ -59,10 +59,11 @@ describe("device software inventory", () => {
     expect(screen.getByText(/Last complete:/).parentElement?.textContent).toContain("Never");
   });
 
-  it("keeps unsupported installed applications visible without offering uninstall", async () => {
+  it("hides installed applications without an exact supported package identity", async () => {
     renderPanel();
-    expect(await screen.findByText("Editor")).toBeTruthy();
-    expect(await screen.findByText(/Unavailable: no exact supported package identity/)).toBeTruthy();
+    expect(await screen.findByText("No supported applications on this page")).toBeTruthy();
+    expect(screen.queryByText("Editor")).toBeNull();
+    expect(screen.queryByText(/Unavailable: no exact supported package identity/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Uninstall" })).toBeNull();
   });
 

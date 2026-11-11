@@ -2,16 +2,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import ctypes
+import base64
 from datetime import UTC, datetime
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Callable
 from urllib.parse import urlsplit
+from uuid import uuid4
 from labguard_client.winget_discovery import (
     WingetExecutableNotFound,
     discover_winget_executable,
@@ -205,6 +209,112 @@ def build_command(offer: SoftwareJobOffer, executable: str) -> list[str]:
     raise ValueError("Unsupported package manager")
 
 
+def _execute_user_scope_in_active_session(offer: SoftwareJobOffer, *, progress=None,
+                                          cancellation_event=None) -> PackageResult:
+    """Run only a typed USER-scope WinGet job as the active console user."""
+    if os.name != "nt":
+        raise UnsupportedExecutionContext("active_user_session_unavailable")
+    if offer.action != "UNINSTALL" or offer.package_manager != "WINGET" or offer.installation_scope != "USER":
+        raise UnsupportedExecutionContext("unsupported_active_user_operation")
+    job_handle = process_handle = thread_handle = primary_token = user_token = None
+    process_resumed = False
+    result_path: Path | None = None
+    try:
+        import win32con
+        import win32event
+        import win32job
+        import win32process
+        import win32profile
+        import win32security
+        import win32ts
+
+        get_console_session = ctypes.windll.kernel32.WTSGetActiveConsoleSessionId
+        get_console_session.restype = ctypes.c_ulong
+        session_id = int(get_console_session())
+        if session_id == 0xFFFFFFFF or session_id == 0:
+            raise UnsupportedExecutionContext("active_user_session_unavailable")
+        user_token = win32ts.WTSQueryUserToken(session_id)
+        primary_token = win32security.DuplicateTokenEx(
+            user_token, win32security.SecurityImpersonation, win32con.MAXIMUM_ALLOWED,
+            win32security.TokenPrimary, None)
+        environment = win32profile.CreateEnvironmentBlock(primary_token, False)
+        temp_dir = environment.get("TEMP") or environment.get("TMP")
+        if not temp_dir:
+            raise UnsupportedExecutionContext("active_user_temp_unavailable")
+        result_path = Path(temp_dir) / f"LabGuard-Software-{uuid4().hex}.json"
+        offer_arg = base64.urlsafe_b64encode(
+            json.dumps({"job_id": offer.job_id, "action": offer.action,
+                        "package_id": offer.package_id, "package_manager": offer.package_manager,
+                        "version": offer.version, "installation_scope": offer.installation_scope,
+                        "source": offer.source, "source_url": offer.source_url,
+                        "expires_at": offer.expires_at, "timeout_seconds": offer.timeout_seconds},
+                       separators=(",", ":")).encode("utf-8")).decode("ascii")
+        command = subprocess.list2cmdline([
+            sys.executable, "-m", "labguard_client.software_user_helper", offer_arg, str(result_path),
+        ])
+        startup = win32process.STARTUPINFO()
+        startup.dwFlags |= win32con.STARTF_USESHOWWINDOW
+        startup.wShowWindow = win32con.SW_HIDE
+        startup.lpDesktop = r"winsta0\default"
+        flags = win32con.CREATE_NO_WINDOW | win32con.CREATE_SUSPENDED | getattr(win32con, "CREATE_UNICODE_ENVIRONMENT", 0)
+        process_handle, thread_handle, _pid, _tid = win32process.CreateProcessAsUser(
+            primary_token, sys.executable, command, None, None, False, flags,
+            environment, temp_dir, startup)
+        job_handle = win32job.CreateJobObject(None, "")
+        info = win32job.QueryInformationJobObject(job_handle, win32job.JobObjectExtendedLimitInformation)
+        info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        win32job.SetInformationJobObject(job_handle, win32job.JobObjectExtendedLimitInformation, info)
+        win32job.AssignProcessToJobObject(job_handle, process_handle)
+        win32process.ResumeThread(thread_handle)
+        process_resumed = True
+        if progress:
+            progress("Running approved uninstall in active user session")
+        # Allow up to two bounded inventory scans (WinGet and Chocolatey each
+        # have their own finite query timeout) in addition to the job timeout.
+        deadline = time.monotonic() + offer.timeout_seconds + 120
+        while True:
+            if cancellation_event is not None and cancellation_event.is_set():
+                win32process.TerminateProcess(process_handle, 1)
+                win32event.WaitForSingleObject(process_handle, 5000)
+                return PackageResult(1, "", cancelled=True)
+            wait = win32event.WaitForSingleObject(process_handle, 250)
+            if wait == win32event.WAIT_OBJECT_0:
+                break
+            if time.monotonic() >= deadline:
+                win32process.TerminateProcess(process_handle, 1)
+                win32event.WaitForSingleObject(process_handle, 5000)
+                return PackageResult(1, "", timed_out=True)
+        helper_exit_code = int(win32process.GetExitCodeProcess(process_handle))
+        if helper_exit_code != 0:
+            raise PackageManagerUnavailable(f"active_user_helper_exit_{helper_exit_code}")
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            result = PackageResult(int(payload["returncode"]), sanitize_output(str(payload.get("output", ""))),
+                                   bool(payload.get("timed_out")), bool(payload.get("cancelled")))
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise PackageManagerUnavailable("active_user_result_unavailable") from exc
+        return result
+    except (PackageManagerUnavailable, UnsupportedExecutionContext):
+        raise
+    except Exception as exc:
+        raise UnsupportedExecutionContext("active_user_session_unavailable") from exc
+    finally:
+        if result_path is not None:
+            result_path.unlink(missing_ok=True)
+        if process_handle is not None and not process_resumed:
+            try:
+                import win32process
+                win32process.TerminateProcess(process_handle, 1)
+            except Exception:
+                pass
+        for handle in (job_handle, thread_handle, process_handle, primary_token, user_token):
+            if handle is not None:
+                try:
+                    handle.Close()
+                except Exception:
+                    pass
+
+
 class WingetAdapter:
     discover = staticmethod(discover_winget)
     build_command = staticmethod(lambda offer, executable: build_command(offer, executable))
@@ -233,6 +343,9 @@ def execute_package_job(offer: SoftwareJobOffer, *, which: Callable[[str], str |
     administrator = is_administrator() if administrator is None else administrator
     service_context = running_in_service_session() if service_context is None else service_context
     if offer.installation_scope == "USER" and (local_system or service_context):
+        if service_context and local_system and offer.action == "UNINSTALL" and offer.package_manager == "WINGET":
+            return _execute_user_scope_in_active_session(offer, progress=progress,
+                                                         cancellation_event=cancellation_event)
         raise UnsupportedExecutionContext("user_scope_unavailable_in_service_session")
     if offer.installation_scope == "MACHINE":
         if not service_context:

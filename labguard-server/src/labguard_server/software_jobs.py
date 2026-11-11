@@ -5,7 +5,7 @@ from datetime import timedelta
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from labguard_server.models import (Device, DeviceCredential, DeviceStatus, SoftwareCatalogPackage,
@@ -54,6 +54,15 @@ def job_out(job: SoftwareJob) -> dict:
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
     }
+
+
+def clear_terminal_software_jobs(db: Session, *, device_id: UUID | None = None) -> int:
+    """Delete completed job history only; active jobs are never cleared."""
+    statement = delete(SoftwareJob).where(SoftwareJob.status.in_(TERMINAL_JOB_STATES))
+    if device_id is not None:
+        statement = statement.where(SoftwareJob.device_id == device_id)
+    result = db.execute(statement)
+    return max(0, result.rowcount or 0)
 
 
 def create_software_job(db: Session, device_id: UUID, requested_by: UUID, body: SoftwareJobCreate,

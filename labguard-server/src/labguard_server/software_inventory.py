@@ -200,7 +200,8 @@ def device_software_items(db: Session, device_id: UUID, *, search: str | None = 
     if software_key:
         query = query.where(SoftwareInventoryItem.product_key == software_key)
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
-    rows = db.scalars(query.order_by(SoftwareInventoryItem.name, SoftwareInventoryItem.version)
+    rows = db.scalars(query.order_by(SoftwareInventoryItem.name, SoftwareInventoryItem.version,
+                                    SoftwareInventoryItem.id)
                       .offset(offset).limit(limit)).all()
     return [_item_out(row) for row in rows], total
 
