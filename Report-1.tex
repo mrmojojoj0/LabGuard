@@ -367,7 +367,8 @@ payload device identifier, supplies the authority used for ingestion.
 An authorized administrator creates a room and submits a complete grid layout.
 The server validates device references, coordinate bounds and uniqueness, then
 commits the layout atomically. The dashboard renders the room floor plan from
-REST state and refetches after SSE invalidation.
+REST state and refetches after SSE invalidation, as summarized in
+Figure~\ref{fig:room-layout-flow}.
 
 \begin{figure}[H]
 \centering
@@ -418,6 +419,32 @@ Heartbeat updates availability. Telemetry describes a machine sample. Software
 inventory is a separate, eventually consistent description of installed
 software and is not a liveness signal.
 
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=8mm and 10mm]
+\node[block] (timer) {Telemetry interval\\or startup trigger};
+\node[block, right=of timer] (collectors) {CPU, memory, disk,\\OS and network collectors};
+\node[block, right=of collectors] (sample) {Validate and bound\\telemetry sample};
+\node[block, below=of sample] (sendtele) {Send typed\\telemetry event};
+\node[store, left=of sendtele] (latest) {Latest telemetry\\row};
+\node[store, left=of latest] (history) {Telemetry sample\\history};
+\draw[line] (timer)--(collectors)--(sample)--(sendtele);
+\draw[line] (sendtele)--(latest)--(history);
+\draw[dashedline] (sendtele) to[bend left=22] node[above]{collector error} (timer);
+\end{tikzpicture}
+\caption{Dedicated system telemetry collection pipeline.}
+\label{fig:telemetry-collection-pipeline}
+\end{figure}
+
+The telemetry path is independent of heartbeat processing and is shown in
+Figure~\ref{fig:telemetry-collection-pipeline}. A collector reads
+the current host values, serializes only the supported fields and sends a
+bounded sample. The server derives the device from the authenticated socket,
+records both the collection time and its own receipt time, updates the latest
+row and appends the historical sample. A collector failure is stored or
+reported as an error condition; it is not represented as a successful sample
+containing fabricated zeroes.
+
 \begin{algorithm}[H]
 \caption{Authenticated heartbeat processing}
 \label{alg:heartbeat}
@@ -434,15 +461,29 @@ software and is not a liveness signal.
 \end{algorithmic}
 \end{algorithm}
 
-\subsection{Telemetry and inventory}
-The agent collects bounded CPU, memory, disk, host and current-context values,
-then sends a typed sample. The server stores server receipt time and exposes
-latest and historical views. Collection errors remain distinct from empty
-values. Software inventory reads uninstall information from supported registry
-views and loaded user hives, and reads local WinGet and Chocolatey listings
-when available. It normalizes records, reconciles only unambiguous registry and
-WinGet pairs, preserves source provenance and sends bounded batches. The server
-replaces the current snapshot only after a complete scan is assembled.
+\begin{algorithm}[H]
+\caption{Telemetry collection and ingestion}
+\label{alg:telemetry}
+\begin{algorithmic}[1]
+\State Trigger the collector at its configured interval
+\State Read CPU, memory, storage, operating-system and network-interface values
+\State Include collection timestamp and supported context fields
+\State Reject out-of-range values and cap list and serialized payload sizes
+\State Send the typed sample through the authenticated device WebSocket
+\State On the server, derive the device from the connection and record receipt time
+\State Update the device's latest telemetry row and append the historical sample
+\State Publish an invalidation only after the database transaction succeeds
+\State Preserve a structured collection error when a source cannot be read
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Software inventory collection}
+Software inventory is a read-only endpoint process. It reads uninstall
+metadata from supported registry views and loaded user hives, then reads local
+WinGet and Chocolatey listings when available. It normalizes records, reconciles
+only unambiguous registry and WinGet pairs, preserves source provenance and
+sends bounded batches. The server replaces the current inventory snapshot only
+after a complete scan is assembled.
 
 \begin{algorithm}[H]
 \caption{Software inventory collection}
@@ -494,7 +535,9 @@ than silent cursor advancement. This is event-based audit monitoring, not
 packet capture: it does not provide URLs, decrypted HTTPS, credentials or
 every UDP, ICMP or short-lived flow.
 
-The agent separately records active TCP and UDP sockets with \texttt{psutil},
+The independent socket and peripheral paths are shown in
+Figure~\ref{fig:peripheral-pipeline}. The agent separately records active TCP
+and UDP sockets with \texttt{psutil},
 normally every 30 seconds. Snapshots can miss short-lived flows and therefore
 cannot replace WFP history. Server-side IP enrichment is limited to globally
 routable remote addresses. Peripheral observations are also bounded snapshots;
@@ -519,13 +562,36 @@ system does not disable that device.
 
 \section{Software Management}
 
-\subsection{Discovery and inventory}
-Server-side WinGet discovery runs bounded \texttt{search --name} and exact
-\texttt{show --id} operations using argument arrays and \texttt{shell=False}.
-The selected deployable source is the fixed community WinGet source. Search
-results are metadata, not approval. Direct installation revalidates the exact
-package ID and selected version before creating a job. Chocolatey continues
-through its configured catalog/source path.
+\subsection{Server-side WinGet repository discovery}
+Repository discovery is a separate server-side operation, shown in
+Figure~\ref{fig:winget-discovery-pipeline}, and does not ask an
+endpoint to search its local package manager. For a LAB\_ADMIN request, the
+server runs bounded \texttt{search --name} and exact \texttt{show --id}
+operations using argument arrays and \texttt{shell=False}. It parses the
+aligned command output, caps result counts and exposes package metadata. The
+supported deployable source is the fixed community WinGet source. Search
+results are not approvals; direct installation revalidates the exact package
+ID and selected version before creating a job.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=8mm and 10mm]
+\node[block] (query) {LAB\_ADMIN search\\request};
+\node[block, right=of query] (validatequery) {Bound query and\\fixed source};
+\node[block, right=of validatequery] (search) {Server WinGet\\search --name};
+\node[block, below=of search] (parse) {Parse bounded\\table output};
+\node[block, left=of parse] (exact) {Optional exact\\show --id};
+\node[store, left=of exact] (metadata) {Repository metadata\\for dashboard};
+\draw[line] (query)--(validatequery)--(search)--(parse)--(exact)--(metadata);
+\draw[dashedline] (metadata) to[bend left=25] node[above]{recheck at install} (validatequery);
+\end{tikzpicture}
+\caption{Server-side WinGet repository discovery pipeline.}
+\label{fig:winget-discovery-pipeline}
+\end{figure}
+
+\subsection{Endpoint inventory pipeline}
+The endpoint inventory pipeline is shown in
+Figure~\ref{fig:software-inventory-flow}.
 
 \begin{figure}[H]
 \centering
@@ -546,7 +612,8 @@ through its configured catalog/source path.
 \end{figure}
 
 \subsection{Individual job lifecycle}
-The supported operation is a persistent individual job for one device. The
+The supported operation is a persistent individual job for one device. Its
+state transitions are shown in Figure~\ref{fig:software-job-lifecycle}. The
 server validates device state, action, manager, exact package identity, scope,
 source and repository metadata, writes the job and audit record, and returns
 accepted state. Offline jobs remain pending. A connected agent receives a
@@ -558,26 +625,24 @@ insufficient.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[node distance=11mm and 16mm]
-\node[block] (request) {Admin request};
-\node[decision, right=of request] (valid) {Exact identity,\\role and target valid?};
-\node[store, right=of valid] (pending) {PENDING job};
-\node[block, below=of pending] (offer) {Authenticated\\job offer};
-\node[decision, left=of offer] (journal) {Journal says\\terminal?};
-\node[block, left=of journal] (execute) {Allowlisted adapter\\and bounded process};
-\node[decision, below=of execute] (verify) {Fresh inventory\\matches action?};
-\node[block, left=of verify] (complete) {COMPLETED};
-\node[block, right=of verify] (failed) {FAILED or\\UNCERTAIN};
-\draw[line] (request)--(valid);
-\draw[line] (valid)--node[above]{yes}(pending);
-\draw[line] (valid)--node[above]{no}(failed);
-\draw[line] (pending)--(offer)--(journal);
-\draw[line] (journal)--node[above]{no}(execute)--(verify);
-\draw[line] (journal)--node[above]{yes}(complete);
-\draw[line] (verify)--node[below]{yes}(complete);
-\draw[line] (verify)--node[below]{no}(failed);
+\begin{tikzpicture}[node distance=8mm and 10mm]
+\node[store] (pending) {PENDING};
+\node[store, right=of pending] (dispatched) {DISPATCHED};
+\node[store, right=of dispatched] (running) {RUNNING};
+\node[store, right=of running] (succeeded) {SUCCEEDED};
+\node[store, below=of dispatched] (expired) {EXPIRED};
+\node[store, below=of running] (failed) {FAILED};
+\node[store, below=of succeeded] (cancelled) {CANCELLED};
+\draw[line] (pending)--node[above]{online offer}(dispatched);
+\draw[line] (dispatched)--node[above]{accepted / started}(running);
+\draw[line] (running)--node[above]{verified}(succeeded);
+\draw[line] (pending)--node[left]{deadline}(expired);
+\draw[line] (dispatched)--node[right]{deadline}(expired);
+\draw[line] (running)--node[right]{error or uncertain}(failed);
+\draw[line] (pending) to[bend right=22] node[below]{authorized clear}(cancelled);
+\draw[dashedline] (dispatched) to[bend left=22] node[above]{redelivery} (pending);
 \end{tikzpicture}
-\caption{Software installation and uninstallation flow.}
+\caption{Persistent software-job state transitions.}
 \label{fig:software-job-lifecycle}
 \end{figure}
 
@@ -595,12 +660,13 @@ insufficient.
 \EndIf
 \State Persist nonterminal journal entry before side effects
 \State Execute fixed manager argument array with bounded output and runtime
-\State Send lifecycle and progress events
+\State Transition the server job through DISPATCHED and RUNNING events
+\State Send bounded progress events while the manager is running
 \State Run a complete fresh inventory scan
 \If{inventory proves requested state}
-  \State Persist and report success
+\State Persist SUCCEEDED and report success
 \Else
-  \State Persist explicit verification failure
+  \State Persist FAILED or UNCERTAIN according to execution certainty
 \EndIf
 \end{algorithmic}
 \end{algorithm}
@@ -612,12 +678,14 @@ jobs are never deleted.
 \section{Remote Administration}
 
 \subsection{Process control and RDP preparation}
-Process operations are typed LIST, TERMINATE or KILL requests. A termination
-target carries both PID and process creation time, so PID reuse cannot silently
+Process operations are typed LIST, TERMINATE or KILL requests; their
+validation path is shown in Figure~\ref{fig:process-management-flow}. A
+termination target carries both PID and process creation time, so PID reuse cannot silently
 select a different process. Requests expire after 90 seconds and offline
 devices fail explicitly.
 
-RDP support prepares access; it does not stream or control a desktop. A
+RDP support prepares access; its bounded lease is shown in
+Figure~\ref{fig:rdp-preparation-flow}. It does not stream or control a desktop. A
 LAB\_ADMIN request is stored and audited, then delivered to an online approved
 device. The agent checks Windows edition, elevation and firewall prerequisites,
 records original settings, enables the listener and adds request-specific
@@ -627,22 +695,41 @@ reachability and Windows credentials remain necessary.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[node distance=9mm and 14mm]
-\node[block] (op) {Admin process or\\RDP request};
-\node[decision, right=of op] (state) {Online, approved,\\authorized and valid?};
-\node[block, right=of state] (deliver) {Typed WebSocket\\delivery};
-\node[decision, below=of deliver] (local) {Local checks\\succeed?};
-\node[block, left=of local] (apply) {PID-time validation\\or reversible lease};
-\node[store, left=of apply] (result) {Audited result};
-\node[block, right=of local] (fail) {Explicit failure};
-\draw[line] (op)--(state);
-\draw[line] (state)--node[above]{yes}(deliver)--(local);
-\draw[line] (state)--node[above]{no}(fail);
-\draw[line] (local)--node[below]{yes}(apply)--(result);
-\draw[line] (local)--node[below]{no}(fail);
+\begin{tikzpicture}[node distance=8mm and 10mm]
+\node[block] (request) {LIST, TERMINATE\\or KILL request};
+\node[decision, right=of request] (valid) {Online, authorized\\and unexpired?};
+\node[block, right=of valid] (send) {Authenticated\\process event};
+\node[decision, below=of send] (identity) {PID and creation\\time match?};
+\node[store, left=of identity] (result) {Bounded result\\and audit record};
+\node[block, right=of identity] (reject) {Reject or\\expire request};
+\draw[line] (request)--(valid);
+\draw[line] (valid)--node[above]{yes}(send)--(identity);
+\draw[line] (valid)--node[above]{no}(reject);
+\draw[line] (identity)--node[below]{yes}(result);
+\draw[line] (identity)--node[right]{no}(reject);
 \end{tikzpicture}
-\caption{Remote process operation and RDP preparation pipeline.}
-\label{fig:remote-operation-flow}
+\caption{PID-bound process management pipeline.}
+\label{fig:process-management-flow}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=8mm and 10mm]
+\node[block] (rdprequest) {LAB\_ADMIN RDP\\preparation request};
+\node[block, right=of rdprequest] (persist) {Persist and audit\\short request};
+\node[decision, right=of persist] (checks) {Approved, online,\\supported and elevated?};
+\node[block, below=of checks] (marker) {Save original registry\\state and lease marker};
+\node[block, left=of marker] (rules) {Apply 3389 local-subnet\\firewall rules};
+\node[store, left=of rules] (ready) {READY result\\and 60-minute lease};
+\node[block, right=of checks, xshift=10mm] (fail) {FAILED result};
+\node[block, below=of ready] (restore) {Expiry, forced cleanup\\or failed setup restores state};
+\draw[line] (rdprequest)--(persist)--(checks);
+\draw[line] (checks)--node[right]{yes}(marker)--(rules)--(ready);
+\draw[line] (checks)--node[above]{no}(fail);
+\draw[line] (ready)--(restore);
+\end{tikzpicture}
+\caption{Reversible RDP preparation lease pipeline.}
+\label{fig:rdp-preparation-flow}
 \end{figure}
 
 \subsection{Screenshot evidence}
@@ -654,7 +741,25 @@ The service sends sequential 32 KiB chunks. The server validates type, size,
 ordering and device association before writing metadata and bytes. Evidence
 expires after 24 hours and may be deleted earlier by an authorized
 administrator. A screenshot is a momentary screen observation, not proof of
-identity or compliance.
+identity or compliance. The request, helper, chunk and storage stages are
+shown in Figure~\ref{fig:screenshot-capture-flow}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=8mm and 10mm]
+\node[block] (capture) {Administrator screenshot\\request or exam burst};
+\node[decision, right=of capture] (eligible) {Online and active\\console session?};
+\node[block, right=of eligible] (helper) {Session helper captures\\bounded JPEG};
+\node[block, below=of helper] (chunks) {Sequential 32 KiB\\WebSocket chunks};
+\node[store, left=of chunks] (storecapture) {Validate metadata;\\store file and record};
+\node[block, below=of eligible] (capturefail) {FAILED capture\\record};
+\draw[line] (capture)--(eligible);
+\draw[line] (eligible)--node[above]{yes}(helper)--(chunks)--(storecapture);
+\draw[line] (eligible)--node[right]{no}(capturefail);
+\end{tikzpicture}
+\caption{Endpoint screenshot capture and evidence-storage pipeline.}
+\label{fig:screenshot-capture-flow}
+\end{figure}
 
 \section{Examination Management}
 
@@ -664,7 +769,8 @@ desired executable restrictions, browser setting, network mode/CIDR allow-list,
 USB setting and evidence option. The server validates time zones, room
 membership, CIDRs, supported browser names and overlaps, then persists the
 target device set. A same-process monitor changes scheduled records to ACTIVE
-and later COMPLETED using UTC time.
+and later COMPLETED using UTC time. This scheduling path is shown in
+Figure~\ref{fig:exam-scheduling-flow}.
 
 \begin{figure}[H]
 \centering
@@ -700,24 +806,68 @@ requested.
 Findings are persisted and deduplicated by examination, device and finding
 identity. A browser or other finding can queue four screenshots at detection,
 10, 20 and 30 seconds. Missed schedules or disconnected agents fail the
-capture records without deleting the violation.
+capture records without deleting the violation. The monitoring branches are
+shown in Figure~\ref{fig:exam-monitoring-flow}.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[node distance=9mm and 12mm]
-\node[block] (activeexam) {Active exam\\monitor tick};
-\node[block, right=of activeexam] (signals) {Heartbeat, browser,\\WFP and USB observations};
-\node[decision, right=of signals] (finding) {Supported signal\\is a violation?};
-\node[store, below=of finding] (record) {Deduplicated\\violation};
-\node[block, left=of record] (burst) {Optional four-capture\\evidence burst};
-\node[store, left=of burst] (report) {Exam report\\and dashboard};
-\draw[line] (activeexam)--(signals)--(finding);
-\draw[line] (finding)--node[right]{yes}(record)--(burst)--(report);
-\draw[line] (finding)--node[above]{no}(report);
+\begin{tikzpicture}[node distance=7mm and 9mm]
+\node[block] (tick) {Active exam\\monitor tick};
+\node[decision, right=of tick] (online) {Target agent\\ONLINE?};
+\node[block, below=of online] (offline) {Create deduplicated\\AGENT\_OFFLINE finding};
+\node[block, right=of online] (browser) {Request browser scan\\at most every 15 s};
+\node[block, below=of browser] (observed) {Read WFP allowed events\\and USB observations};
+\node[decision, right=of observed] (match) {Observed signal\\matches policy?};
+\node[store, below=of match] (record) {Unique event key;\\persist violation};
+\node[block, left=of record] (burst) {Queue captures at\\0, 10, 20, 30 s};
+\node[store, left=of burst] (report) {Publish invalidation;\\report reads records};
+\draw[line] (tick)--(online);
+\draw[line] (online)--node[right]{no}(offline)--(record);
+\draw[line] (online)--node[above]{yes}(browser)--(observed)--(match);
+\draw[line] (match)--node[right]{yes}(record)--(burst)--(report);
+\draw[line] (match)--node[above]{no}(report);
 \end{tikzpicture}
 \caption{Examination monitoring and violation pipeline.}
 \label{fig:exam-monitoring-flow}
 \end{figure}
+
+\begin{algorithm}[H]
+\caption{Examination violation detection}
+\label{alg:exam-violations}
+\begin{algorithmic}[1]
+\Require active examination, target device observations and policy JSON
+\ForAll{target devices}
+  \State Read current \texttt{DeviceStatus}
+  \If{agent state is not \texttt{ONLINE}}
+    \State Candidate $\gets$ \texttt{AGENT\_OFFLINE} with heartbeat context
+  \EndIf
+  \If{network mode is \texttt{ALLOW\_LIST}}
+    \State Query allowed WFP events since the examination start
+    \ForAll{events whose remote address is outside the configured CIDRs}
+      \State Candidate $\gets$ \texttt{NETWORK\_OUTSIDE\_ALLOW\_LIST}
+    \EndFor
+  \EndIf
+  \If{USB observation is requested}
+    \State Query connected external-storage events since examination start
+    \State Add each connected storage event as a candidate
+  \EndIf
+  \If{browser restriction is enabled and scan is due}
+    \State Request only the configured common browser names
+    \ForAll{reported matching browser names}
+      \State Candidate $\gets$ \texttt{RESTRICTED\_BROWSER\_RUNNING}
+    \EndFor
+  \EndIf
+\EndFor
+\ForAll{candidates}
+  \State Build a stable event key and test the exam uniqueness constraint
+  \If{key is new}
+    \State Persist violation and system audit event
+    \State Queue four independent screenshot records if enabled
+  \EndIf
+\EndFor
+\State Publish dashboard invalidations after successful commits
+\end{algorithmic}
+\end{algorithm}
 
 \textbf{Accuracy boundary.} Saved examination restrictions are desired policy
 records, not endpoint enforcement policies. The current client does not receive
@@ -794,6 +944,7 @@ checks are performed on the server. Device authentication uses an Ed25519
 key, challenge response, TLS certificate verification and a short-lived
 single-use ticket. Device identity is derived from the ticket-bound socket.
 
+The authorization boundary is summarized in Figure~\ref{fig:security-flow}.
 Every privileged mutation is audited with actor, action, target, time and
 bounded details. Package execution uses exact package identities, fixed
 argument arrays, bounded output/runtime and \texttt{shell=False}. RDP changes
