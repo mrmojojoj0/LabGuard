@@ -73,20 +73,22 @@ export function OperatingSystemUptime({ data }: { data: TelemetrySnapshot | null
     ["Boot time", new Date(data.boot_time).toLocaleString()],
   ];
   return (
-    <Panel>
-      <PanelTitle>Operating system &amp; uptime</PanelTitle>
-      <div className="grid">
-        {rows.map(([label, value], index) => (
-          <div
-            className={`flex justify-between gap-3 py-2.5 text-[10px] ${index < rows.length - 1 ? "border-b border-[var(--color-border)]" : ""}`}
-            key={label}
-          >
-            <span className="text-[var(--color-muted)]">{label}</span>
-            <strong className="text-right text-[var(--color-foreground)]">{value}</strong>
-          </div>
-        ))}
-      </div>
-    </Panel>
+    <div style={{ display: "none" }}>
+      <Panel>
+        <PanelTitle>Operating system &amp; uptime</PanelTitle>
+        <div className="grid">
+          {rows.map(([label, value], index) => (
+            <div
+              className={`flex justify-between gap-3 py-2.5 text-[10px] ${index < rows.length - 1 ? "border-b border-[var(--color-border)]" : ""}`}
+              key={label}
+            >
+              <span className="text-[var(--color-muted)]">{label}</span>
+              <strong className="text-right text-[var(--color-foreground)]">{value}</strong>
+            </div>
+          ))}
+        </div>
+      </Panel>
+    </div>
   );
 }
 
@@ -120,7 +122,7 @@ export function NetworkInterfaces({ data, deviceId }: { data: TelemetrySnapshot 
               <tr className="border-b border-[var(--color-border)] text-[var(--color-muted)]">
                 <th className="p-2">Time</th><th className="p-2">Direction</th><th className="p-2">Domain / IP</th>
                 <th className="p-2">Type</th>{showFullInfo && <><th className="p-2">Interface</th><th className="p-2">Local endpoint</th>
-                <th className="p-2">Remote endpoint</th></>}<th className="p-2">Organization</th><th className="p-2">State</th>
+                  <th className="p-2">Remote endpoint</th></>}<th className="p-2">Organization</th><th className="p-2">State</th>
               </tr>
             </thead>
             <tbody>
